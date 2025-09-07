@@ -372,23 +372,22 @@ class MTRRNet(nn.Module):
         
         # 多尺度Token编码器
         self.token_encoder = MultiScaleTokenEncoder(
-            embed_dims=[192, 192, 96, 96],    # 对应原encoder0~3的embed_dim  
-            mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
+            embed_dims=[96, 96, 96, 96],    # 对应原encoder0~3的embed_dim  
+            mamba_blocks=[5, 5, 5, 5],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
+            drop_branch_prob=0.2,
             training=self.training                      # 启用训练模式以支持随机失活
         )
         
         # Token SubNet：多尺度token融合
         self.token_subnet = TokenSubNet(
-            ref_resolution=64,     # 统一到64x64分辨率网格
-            embed_dim=192,         # 融合后的token维度
-            num_blocks=3           # 融合细化的block数
+            embed_dim=96,         # 融合后的token维度
+            mam_blocks=3           # 融合细化的block数
         )
         
         # 统一Token解码器
         self.token_decoder = UnifiedTokenDecoder(
-            token_dim=192,         # 输入token维度
-            ref_resolution=64,     # token网格分辨率
+            token_dim=96,         # 输入token维度
             base_scale_init=0.3    # base缩放因子初始值
         )
         
@@ -417,12 +416,10 @@ class MTRRNet(nn.Module):
         rmap, _, _, _ = self.rdm(x_in)  # rmap: (B, 3, 256, 256)
         
         # 2. 多尺度Token编码
-        tokens_list, aux_preds = self.token_encoder(x_in)
+        tokens_list = self.token_encoder(x_in)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         # aux_preds: {'aux_s0': pred, ...} 中间监督预测
         
-        # 缓存中间监督结果
-        self.intermediates.update(aux_preds)
         
         # 缓存token统计用于监控
         for i, tokens in enumerate(tokens_list):
@@ -457,12 +454,12 @@ class MTRRNet(nn.Module):
 
 class MTRREngine(nn.Module):
  
-    def __init__(self, opts, device):
+    def __init__(self, opts, device, training=True):
         super(MTRREngine, self).__init__()
         self.device = device 
         self.opts  = opts
         self.visual_names = ['fake_T', 'fake_R', 'c_map', 'I', 'Ic', 'T', 'R']
-        self.netG_T = MTRRNet().to(device)  
+        self.netG_T = MTRRNet(training=training).to(device)  
         self.netG_T.apply(self.init_weights)
         self.net_c = PretrainedConvNext_e2e("convnext_small_in22k").cuda()
         # print(torch.load('./pretrained/cls_model.pth', map_location=str(self.device)).keys())

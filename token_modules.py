@@ -74,36 +74,37 @@ def init_all_weights(model: nn.Module):
                 nn.init.kaiming_normal_(param, mode='fan_in', nonlinearity='linear')
 
 
-class FrequencySplit(nn.Module):
-    """频带分离：输入图像分离为低频（模糊）和高频部分"""
-    def __init__(self, kernel_size=5):
-        super().__init__()
-        self.kernel_size = kernel_size
-        # 使用可学习的高斯核进行低频提取
-        self.register_parameter('blur_weight', nn.Parameter(torch.ones(1)))
+class AAF(nn.Module):
+    """
+    输入: List[Tensor], 每个 shape 为 [B, C, H, W]
+    输出: Tensor, shape 为 [B, C, H, W]
+    """
+    def __init__(self, in_channels, num_inputs): # in_channels 每个图像的通道 num_input 有多少个图像
+        super(AAF, self).__init__()
+        self.in_channels = in_channels
+        self.num_inputs = num_inputs
         
-    def forward(self, x):
-        # 创建高斯模糊核
-        kernel = self._create_gaussian_kernel(self.kernel_size, x.device)
-        kernel = kernel.expand(x.size(1), 1, self.kernel_size, self.kernel_size)
+        # 输入 concat 后通道为 C*num_inputs
+        self.attn = nn.Sequential(
+            nn.Conv2d(num_inputs * in_channels, num_inputs * in_channels * 16, kernel_size=1, bias=False, padding_mode='reflect'),
+            nn.Conv2d(num_inputs * in_channels * 16, num_inputs, kernel_size=1, bias=False, padding_mode='reflect'),
+            nn.Softmax(dim=1)  # 对每个位置的 num_inputs 做归一化
+        )
+
+    def forward(self, features):
+        # features: list of Tensors [B, L, C]
+        B, L, C = features[0].shape
+        x = torch.cat(features, dim=2)  # shape: [B, L, C*num_inputs]
+        x = x.permute(0, 2, 1).contiguous().view(B, C * self.num_inputs, int(L**0.5), int(L**0.5))  # shape: [B, C*num_inputs, H, W]
+        x = self.attn(x)     # shape: [B, num_inputs, H, W]
+        x = x.permute(0, 2, 3, 1).contiguous().view(B, L, self.num_inputs)  # shape: [B, L, num_inputs]
         
-        # 低频：高斯模糊
-        padding = self.kernel_size // 2
-        low_freq = F.conv2d(x, kernel, padding=padding, groups=x.size(1))
-        low_freq = low_freq * self.blur_weight
-        
-        # 高频：原图减去低频
-        high_freq = x - low_freq
-        
-        return low_freq, high_freq
-    
-    def _create_gaussian_kernel(self, kernel_size, device):
-        """创建高斯核"""
-        coords = torch.arange(kernel_size, dtype=torch.float32, device=device) - (kernel_size - 1) / 2
-        grid = coords.unsqueeze(0).expand(kernel_size, -1)
-        kernel = torch.exp(-(grid ** 2 + grid.T ** 2) / (2 * (kernel_size / 6) ** 2))
-        kernel = kernel / kernel.sum()
-        return kernel.unsqueeze(0).unsqueeze(0)
+        # 融合：对每个尺度乘以权重后相加
+        out = 0
+        for i in range(self.num_inputs):
+            out += features[i] * x[:, :, i:i+1]            # 广播乘法
+        return out
+
 
 
 class TokenPatchEmbed(nn.Module):
@@ -283,10 +284,11 @@ class VSSTokenMambaModule(nn.Module):
             ))
 
     def forward(self, x):
+        x = x.view(x.size(0), x.size(1)**0.5, x.size(1)**0.5,x.size(2)).contiguous()
         for i,layer in enumerate(self.layers):
             # print(f'VSS Stage {i} Input:', x.shape)  # (B, H, W, C)
             x = layer(x)
-        return x
+        return x.view(x.size(0), x.size(1)*x.size(2), x.size(3)).contiguous()  # (B, N, C)
     
     @staticmethod
     def _make_layer(
@@ -410,11 +412,7 @@ class TokenStage(nn.Module):
         
         # 融合模块
         if self.mamba_processor is not None and self.swin_processor is not None:
-            self.fusion_type = 'weighted'  # 或 'concat'
-            if self.fusion_type == 'weighted':
-                self.fusion_weight = nn.Parameter(torch.tensor(0.5))
-            else:
-                self.fusion_proj = nn.Linear(embed_dim * 2, embed_dim)
+            self.fusion = AAF(embed_dim, 2)
 
     def forward(self, x):
         # 转换为tokens
@@ -447,12 +445,7 @@ class TokenStage(nn.Module):
         # 正常融合（训练时没丢分支 / 测试时）
         # -------------------------
         if self.mamba_processor is not None and self.swin_processor is not None:
-            if self.fusion_type == 'weighted':
-                w = torch.sigmoid(self.fusion_weight)
-                fused_tokens = w * low_tokens + (1 - w) * high_tokens
-            else:
-                concat_tokens = torch.cat([low_tokens, high_tokens], dim=-1)
-                fused_tokens = self.fusion_proj(concat_tokens)
+            fused_tokens = self.fusion([low_tokens, high_tokens])
         elif self.mamba_processor is not None:
             fused_tokens = low_tokens
         else:
@@ -465,7 +458,7 @@ class TokenStage(nn.Module):
 class MultiScaleTokenEncoder(nn.Module):
     """多尺度Token编码器：处理4个尺度得到token表示"""
     def __init__(self, embed_dims=[96, 96, 96, 96], 
-                 mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2],training=True):
+                 mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2],drop_branch_prob=0.2,training=True):
         super().__init__()
         self.scales = [256, 128, 64, 32]  # 对应encoder0~3的分辨率
         self.patch_sizes = [4, 4, 4, 2]  # 每个尺度的patch size
@@ -482,7 +475,7 @@ class MultiScaleTokenEncoder(nn.Module):
                 mamba_blocks=mb,
                 swin_blocks=sb,
                 window_size=8,
-                drop_branch_prob=0.1,
+                drop_branch_prob=drop_branch_prob,
                 training=training
             )
             self.stages.append(stage)
@@ -490,7 +483,6 @@ class MultiScaleTokenEncoder(nn.Module):
     def forward(self, x_in):
         # x_in: (B, 3, 256, 256)
         tokens_list = []
-        aux_preds = {}
         
         for i, stage in enumerate(self.stages):
             # 下采样到对应尺度
@@ -501,34 +493,30 @@ class MultiScaleTokenEncoder(nn.Module):
                 x_scale = x_in
             
             # 获得该尺度的token表示
-            tokens, aux_pred = stage(x_scale)
+            tokens = stage(x_scale)
             tokens_list.append(tokens)
             
-            if aux_pred is not None:
-                aux_preds[f'aux_s{i}'] = aux_pred
-        
-        return tokens_list, aux_preds
+        return tokens_list
 
 
 class TokenSubNet(nn.Module):
     """Token融合/细化模块：多尺度token交互融合"""
-    def __init__(self, ref_resolution=64, embed_dim=192, num_blocks=3):
+    def __init__(self, embed_dims=[96,96,96,96], mam_blocks=[3,3,3,3]):
         super().__init__()
-        self.ref_resolution = ref_resolution
-        self.embed_dim = embed_dim
+        self.embed_dims = embed_dims
         
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # 融合后的细化处理
         self.refinement_blocks = nn.ModuleList()
-        for _ in range(len(self.projectors)):
+        for i in range(len(embed_dims)):
             self.refinement_blocks.append(nn.Sequential(
-                VSSTokenMambaModule(dims=[embed_dim], depths=[num_blocks]),
+                VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]]),
             ))
 
         alpha_init_value = 0.5  # 融合权重初始值
-        channels = [embed_dim]*4
+        channels = embed_dims
         self.alpha0 = nn.Parameter(alpha_init_value * torch.ones((1, channels[0], 1, 1)),
                                    requires_grad=True) if alpha_init_value > 0 else None
         self.alpha1 = nn.Parameter(alpha_init_value * torch.ones((1, channels[1], 1, 1)),
@@ -570,6 +558,8 @@ class TokenSubNet(nn.Module):
             sign = data.sign() # ​​符号保留​​
             data.abs_().clamp_(value) # 将输入张量 data 的每个元素的绝对值限制在 [value, +∞) 范围内
             data *= sign    
+
+
 
 class ConvNextBlock(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:
@@ -617,7 +607,7 @@ class ConvNextBlock(nn.Module):
 
 class UnifiedTokenDecoder(nn.Module):
     """统一Token解码器：从token一次性解码为6通道(T,R)"""
-    def __init__(self, token_dim=192, base_scale_init=0.3):
+    def __init__(self, token_dim=96, base_scale_init=0.3):
         super().__init__()
         self.token_dim = token_dim
         
