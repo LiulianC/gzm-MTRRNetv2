@@ -83,48 +83,75 @@ class LaplacianPyramid(nn.Module):
         self.channel_dim = dim
         laplacian_kernel = np.array([[0, -1, 0],[-1, 4, -1],[0, -1, 0]])
 
-        laplacian_kernel = np.repeat(laplacian_kernel[None, None, :, :], dim, 0) # 变成 (dim, 1, H, W) 
-        # learnable laplacian kernel
+        laplacian_kernel = np.repeat(laplacian_kernel[None, None, :, :], dim, 0)  # (dim, 1, 3, 3)
 
-
-        # 让 kernel 可学习但只允许在微小范围内变动
+        # 可学习 kernel + 保存初值用于约束
         self.kernel = torch.nn.Parameter(torch.FloatTensor(laplacian_kernel))
         self.register_buffer('kernel_init', torch.FloatTensor(laplacian_kernel).clone())
 
-        # 限制 kernel 在初始值±epsilon范围内
-        epsilon = 0.05
+        # 允许偏离初值的带宽（越小越“像拉普拉斯”）
+        self.epsilon = 0.05
+
+        # 初始化时先夹一下，避免一开始就越界
         with torch.no_grad():
-            self.kernel.data.clamp_(self.kernel_init - epsilon, self.kernel_init + epsilon)
+            self.kernel.data.clamp_(self.kernel_init - self.epsilon, self.kernel_init + self.epsilon)
 
-        self.aaf = AAF(3,4)
+        # 给 kernel 挂梯度钩子：投影/截断不合规梯度，训练时每步都会生效
+        self.kernel.register_hook(self._lap_kernel_grad_hook)
 
-        # self.conv0 = Conv2DLayer(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False, norm=nn.BatchNorm2d, act=nn.GELU())
-        # self.conv1 = Conv2DLayer(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False, norm=nn.BatchNorm2d, act=nn.GELU())
-        # self.conv2 = Conv2DLayer(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False, norm=nn.BatchNorm2d, act=nn.GELU())
-        # self.conv3 = Conv2DLayer(in_channels=dim, out_channels=dim, kernel_size=3, padding=1, bias=False, norm=nn.BatchNorm2d, act=nn.GELU())
+        self.aaf = AAF(3, 4)
+
+    def _lap_kernel_grad_hook(self, grad: torch.Tensor) -> torch.Tensor:
+        """
+        自定义反向传播（仅作用于 self.kernel 的梯度）：
+        1) 阻断把 kernel 推出 [init-eps, init+eps] 带的梯度方向
+        2) 去掉破坏“每个通道 3×3 权重零和”的梯度分量
+        3) 做一次温和的范数裁剪，稳住训练
+        """
+        if grad is None:
+            return grad
+
+        # 1) 局部带约束：已经到上界的元素，禁止继续“往外推”；到下界同理
+        with torch.no_grad():
+            over_upper = (self.kernel - self.kernel_init) >= self.epsilon  # 已到上界
+            under_lower = (self.kernel_init - self.kernel) >= self.epsilon  # 已到下界
+
+        # 对应方向的梯度清零（只清“继续往外”的方向）
+        blocked_up = over_upper & (grad > 0)
+        blocked_down = under_lower & (grad < 0)
+        grad = torch.where(blocked_up | blocked_down, torch.zeros_like(grad), grad)
+
+        # 2) 拉普拉斯零和约束：去掉每个(通道×组)的均值分量，避免整体偏移
+        # 形状: (C,1,3,3)，对最后两维求均值并回减
+        mean_per_kernel = grad.mean(dim=(2, 3), keepdim=True)
+        grad = grad - mean_per_kernel
+
+        # 3) 温和范数裁剪（按整体 L2 范数做一次缩放，不会“硬砍”）
+        total_norm = torch.linalg.vector_norm(grad)
+        if torch.isfinite(total_norm) and total_norm > 1.0:
+            grad = grad * (1.0 / total_norm)
+
+        return grad
 
     def forward(self, x):
-        # print(self.kernel[0,0,:,:])
-        # pyramid module for 4 scales.
-        x0 = F.interpolate(x, scale_factor=0.125, mode='bicubic')# 下采样到 1/8
+        # 多尺度
+        x0 = F.interpolate(x, scale_factor=0.125, mode='bicubic')
         x1 = F.interpolate(x, scale_factor=0.25, mode='bicubic')
         x2 = F.interpolate(x, scale_factor=0.5, mode='bicubic')
-        # groups=self.channel_dim：表示使用分组卷积，分组数为 self.channel_dim。当 groups 等于输入通道数时，相当于对每个通道进行独立卷积。
+
+        # 深度可分组卷积提取高频
         lap_0 = F.conv2d(x0, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
         lap_1 = F.conv2d(x1, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
         lap_2 = F.conv2d(x2, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
-        lap_3 = F.conv2d(x, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
+        lap_3 = F.conv2d(x,  self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
+
+        # 还原到同一尺度
         lap_0 = F.interpolate(lap_0, scale_factor=8, mode='bicubic')
         lap_1 = F.interpolate(lap_1, scale_factor=4, mode='bicubic')
         lap_2 = F.interpolate(lap_2, scale_factor=2, mode='bicubic')
-        # lap_0 =  self.conv0(lap_0)
-        # lap_1 =  self.conv1(lap_1)
-        # lap_2 =  self.conv2(lap_2)
-        # lap_3 =  self.conv3(lap_3)
 
-        lap_out = torch.cat([lap_0, lap_1, lap_2, lap_3],dim=1)
-
-        return lap_out, x0,x1,x2 
+        lap_out = torch.cat([lap_0, lap_1, lap_2, lap_3], dim=1)
+        return lap_out, x0, x1, x2
 
 
 class ChannelAttention(nn.Module):
@@ -381,8 +408,8 @@ class MTRRNet(nn.Module):
         
         # Token SubNet：多尺度token融合
         self.token_subnet = TokenSubNet(
-            embed_dim=96,         # 融合后的token维度
-            mam_blocks=3           # 融合细化的block数
+            embed_dims=[96, 96, 96, 96],         # 融合后的token维度
+            mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
         )
         
         # 统一Token解码器
@@ -418,38 +445,21 @@ class MTRRNet(nn.Module):
         # 2. 多尺度Token编码
         tokens_list = self.token_encoder(x_in)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
-        # aux_preds: {'aux_s0': pred, ...} 中间监督预测
-        
-        
-        # 缓存token统计用于监控
-        for i, tokens in enumerate(tokens_list):
-            self.debug_token_stats[f'tokens_s{i}_mean'] = tokens.mean().detach()
-            self.debug_token_stats[f'tokens_s{i}_std'] = tokens.std().detach()
+
         
         # 3. Token SubNet融合
         fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        
-        # 缓存融合后token统计
-        self.debug_token_stats['fused_tokens_mean'] = fused_tokens.mean().detach()
-        self.debug_token_stats['fused_tokens_std'] = fused_tokens.std().detach()
+
         
         # 4. 统一解码：token → 6通道(T,R)
         out = self.token_decoder(fused_tokens, x_in)  # (B, 6, 256, 256)
         
-        # 缓存解码输出统计
-        self.debug_token_stats['output_mean'] = out.mean().detach()
-        self.debug_token_stats['output_std'] = out.std().detach()
         
         return rmap, out
 
 
-    def get_intermediates(self):
-        """获取中间监督结果用于可视化（仅Token-only模式）"""
-        return self.intermediates if not self.use_legacy else {}
     
-    def get_debug_stats(self):
-        """获取debug统计信息（仅Token-only模式）"""
-        return self.debug_token_stats if not self.use_legacy else {}
+
 
 
 class MTRREngine(nn.Module):
@@ -553,21 +563,8 @@ class MTRREngine(nn.Module):
                 )
                 hooks.append(hook)   
         
-        # 额外监控token统计信息
-        self.monitor_token_stats()
 
-    def monitor_token_stats(self):
-        """监控token阶段的统计信息"""
-        os.makedirs('./debug', exist_ok=True)
-        if hasattr(self.netG_T, 'get_debug_stats'):
-            token_stats = self.netG_T.get_debug_stats()
-            with open('./debug/token_stats.log', 'a') as f:
-                for name, value in token_stats.items():
-                    if torch.is_tensor(value):
-                        f.write(f"Token {name:<100} | Value: {value.item():>15.6f}\n")
-                    else:
-                        f.write(f"Token {name:<100} | Value: {value:>15.6f}\n")
-        
+
 
     def monitor_layer_grad(self):
         with open('./debug/grad.log', 'a') as f:

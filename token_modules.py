@@ -125,16 +125,26 @@ class TokenPatchEmbed(nn.Module):
         # 位置编码缩放门（可学习，防止一开始位置占太大比重）
         if self.use_sincos_pos:
             self.pos_alpha = nn.Parameter(torch.tensor(float(pos_init_scale)))
+            # 限制 pos_alpha 的梯度，避免位置编码权重把表达“吃死”
+            self.pos_alpha.register_hook(self._pos_alpha_grad_hook)
+
             # 预生成与默认网格匹配的2D sin/cos位置编码（注册为buffer，不参与训练）
             pos = self._build_2d_sincos_pos_embed(self.grid_size, self.grid_size, embed_dim, device='cpu')
             self.register_buffer('pos_embed', pos, persistent=False)  # shape: (1, N, C)
         else:
             self.register_buffer('pos_embed', None, persistent=False)
 
+    def _pos_alpha_grad_hook(self, grad: torch.Tensor) -> torch.Tensor:
+        if grad is None:
+            return grad
+        # 标量梯度裁剪：幅度不超过0.1（足够学习，又不至于抖动过大）
+        gmax = 0.1
+        return grad.clamp(min=-gmax, max=gmax)
+
     def forward(self, x):
         # x: (B, C, H, W) -> (B, embed_dim, H//ps, W//ps)
         x = self.proj(x)
-        B, C, Ht, Wt = x.shape  # token网格大小（可能与预设一致，也可能不同）
+        B, C, Ht, Wt = x.shape
         # -> (B, embed_dim, num_patches) -> (B, num_patches, embed_dim)
         x = x.flatten(2).transpose(1, 2)
         x = self.norm(x)
@@ -144,7 +154,7 @@ class TokenPatchEmbed(nn.Module):
             if (Ht == self.grid_size) and (Wt == self.grid_size) and (self.pos_embed is not None):
                 x = x + self.pos_alpha * self.pos_embed  # 直接使用预生成buffer
             else:
-                # 动态尺寸：按当前(Ht, Wt)重新生成，避免插值带来的伪差异
+                # 动态尺寸：按当前(Ht, Wt)重新生成
                 pos_dyn = self._build_2d_sincos_pos_embed(Ht, Wt, self.embed_dim, device=x.device)  # (1, Ht*Wt, C)
                 x = x + self.pos_alpha * pos_dyn
 
@@ -152,52 +162,42 @@ class TokenPatchEmbed(nn.Module):
 
     @staticmethod
     def _get_1d_sincos_pos_embed(embed_dim, length, device):
-        """生成1D sin/cos编码（长度=length、维度=embed_dim，embed_dim需为偶数）"""
         if embed_dim % 2 != 0:
-            # 若为奇数，尾部补1维0编码，保证拼接维度一致（尽量不中断训练）
             extra = 1
             d = embed_dim - 1
         else:
             extra = 0
             d = embed_dim
 
-        # 坐标从0到length-1，标准频率范围（与Transformer常用实现一致）
         position = torch.arange(length, dtype=torch.float32, device=device).unsqueeze(1)  # (L,1)
         div_term = torch.exp(torch.arange(0, d, 2, dtype=torch.float32, device=device) * (-math.log(10000.0) / d))  # (d/2,)
 
-        # 计算 sin/cos
         sinusoid = position * div_term  # (L, d/2)
         emb = torch.cat([sinusoid.sin(), sinusoid.cos()], dim=1)  # (L, d)
 
-        if extra == 1:  # 奇数维度时补零列
+        if extra == 1:
             pad = torch.zeros(length, 1, device=device, dtype=torch.float32)
-            emb = torch.cat([emb, pad], dim=1)  # (L, d+1)
+            emb = torch.cat([emb, pad], dim=1)
 
-        return emb  # (L, embed_dim)
+        return emb
 
     @classmethod
     def _build_2d_sincos_pos_embed(cls, H, W, embed_dim, device='cpu'):
-        """
-        生成2D sin/cos位置编码，按行优先展平为 (1, H*W, C)
-        思路：将总维度分成两半，前一半给Y方向，后一半给X方向，再拼接
-        """
-        # 将维度一分为二（尽量均分），独立给H和W
         dim_h = embed_dim // 2
-        dim_w = embed_dim - dim_h  # 避免奇数时丢1维
+        dim_w = embed_dim - dim_h
 
-        # 先生成1D编码
         pos_h = cls._get_1d_sincos_pos_embed(dim_h, H, device)  # (H, dim_h)
         pos_w = cls._get_1d_sincos_pos_embed(dim_w, W, device)  # (W, dim_w)
 
-        # 网格展开：对每个(y,x)拼接 [pos_h[y], pos_w[x]]
-        # 为了可读性，这里明确地两步repeat，再拼接
         pos_h_broadcast = pos_h[:, None, :].repeat(1, W, 1)  # (H, W, dim_h)
         pos_w_broadcast = pos_w[None, :, :].repeat(H, 1, 1)  # (H, W, dim_w)
         pos_2d = torch.cat([pos_h_broadcast, pos_w_broadcast], dim=2)  # (H, W, embed_dim)
 
-        # 展平成 (1, H*W, C)
         pos_2d = pos_2d.view(1, H * W, embed_dim)
         return pos_2d
+
+
+
 
 
 class MambaTokenBlock(nn.Module):
@@ -245,15 +245,17 @@ class VSSTokenMambaModule(nn.Module):
         # =========================
         posembed=False,
         _SS2D=SS2D,
+        channel_first=False,
         # =========================
         **kwargs,        
     ):
         super().__init__()
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
-        self.channel_first = False
+        self.channel_first = channel_first
         self.dims = dims
         self.num_layers = len(depths)
+        
 
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
@@ -284,11 +286,12 @@ class VSSTokenMambaModule(nn.Module):
             ))
 
     def forward(self, x):
-        x = x.view(x.size(0), x.size(1)**0.5, x.size(1)**0.5,x.size(2)).contiguous()
+        # x(B, H, W, C)
+        # print('VSS Input:', x.shape)  # (B, H, W, C)
+        # 自带channel first优化
         for i,layer in enumerate(self.layers):
-            # print(f'VSS Stage {i} Input:', x.shape)  # (B, H, W, C)
             x = layer(x)
-        return x.view(x.size(0), x.size(1)*x.size(2), x.size(3)).contiguous()  # (B, N, C)
+        return x  
     
     @staticmethod
     def _make_layer(
@@ -387,20 +390,23 @@ class SwinTokenBlock(nn.Module):
 
 class TokenStage(nn.Module):
     """单个尺度的Token处理阶段：频带分离→分别编码→融合（支持随机失活分支）"""
-    def __init__(self, img_size, patch_size, in_chans, embed_dim, mamba_blocks=2, swin_blocks=2, window_size=8, drop_branch_prob=0.1, training=True):   # 新增参数：丢失概率
+    def __init__(self, img_size, patch_size, in_chans, embed_dim, mamba_blocks=2, swin_blocks=2, window_size=8, drop_branch_prob=0.1, training=True):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.grid_size = img_size // patch_size
         self.drop_branch_prob = drop_branch_prob
         self.training = training
-        
+
+        # 旁路梯度强度（极小）：不改变前向数值，但能给被丢分支“续一点梯度”
+        self.ghost_grad_coeff = 0.02
+
         # 低频和高频的patch embedding
         self.low_embed = TokenPatchEmbed(img_size, patch_size, in_chans, embed_dim)
         self.high_embed = TokenPatchEmbed(img_size, patch_size, in_chans, embed_dim)
-        
+
         # Mamba处理低频，Swin处理高频
-        self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks]) \
+        self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) \
             if mamba_blocks > 0 else None
         if swin_blocks > 0:
             input_resolution = (self.grid_size, self.grid_size)
@@ -409,19 +415,22 @@ class TokenStage(nn.Module):
                 embed_dim, input_resolution, num_heads, window_size, swin_blocks)
         else:
             self.swin_processor = None
-        
+
         # 融合模块
         if self.mamba_processor is not None and self.swin_processor is not None:
             self.fusion = AAF(embed_dim, 2)
 
     def forward(self, x):
         # 转换为tokens
-        low_tokens = self.low_embed(x)   # (B, N, C)
+        low_tokens = self.low_embed(x)    # (B, N, C)
         high_tokens = self.high_embed(x)  # (B, N, C)
 
         # 分别处理
         if self.mamba_processor is not None:
+            B, N, C = low_tokens.shape
+            low_tokens = low_tokens.view(B, int(N**0.5), int(N**0.5), C).contiguous()
             low_tokens = self.mamba_processor(low_tokens)
+            low_tokens = low_tokens.view(B, N, C).contiguous()
         else:
             low_tokens = torch.zeros_like(low_tokens)
         if self.swin_processor is not None:
@@ -430,17 +439,24 @@ class TokenStage(nn.Module):
             high_tokens = torch.zeros_like(high_tokens)
 
         # -------------------------
-        # 随机失活分支 (类似 DropPath)
+        # 随机失活分支 (期望不变 + 旁路梯度)
         # -------------------------
         if self.training and self.mamba_processor is not None and self.swin_processor is not None:
+            # 期望不变缩放：保留分支除以(1-p)
+            keep_scale = 1.0 / (1.0 - self.drop_branch_prob)
             rand_val = torch.rand(1, device=x.device)
-            if rand_val < self.drop_branch_prob:  
-                # 丢掉 mamba
-                return high_tokens.detach() + high_tokens - high_tokens.detach()
-            elif rand_val < 2*self.drop_branch_prob and rand_val > self.drop_branch_prob:
-                # 丢掉 swin
-                return low_tokens.detach() + low_tokens - low_tokens.detach()
-        
+
+            if rand_val < self.drop_branch_prob:
+                # 丢 Mamba：输出仅来自 Swin；给 Mamba 注入极小“零值旁路项”以获得梯度
+                # (z - z.detach()) 在前向恒为0，但能把上游梯度传给 z
+                ghost = self.ghost_grad_coeff * (low_tokens - low_tokens.detach())
+                return keep_scale * high_tokens + ghost
+
+            elif (rand_val > self.drop_branch_prob) and (rand_val < 2 * self.drop_branch_prob):
+                # 丢 Swin：输出仅来自 Mamba；给 Swin 注入极小“零值旁路项”以获得梯度
+                ghost = self.ghost_grad_coeff * (high_tokens - high_tokens.detach())
+                return keep_scale * low_tokens + ghost
+
         # -------------------------
         # 正常融合（训练时没丢分支 / 测试时）
         # -------------------------
@@ -452,7 +468,6 @@ class TokenStage(nn.Module):
             fused_tokens = high_tokens
 
         return fused_tokens
-
 
 
 class MultiScaleTokenEncoder(nn.Module):
@@ -512,7 +527,7 @@ class TokenSubNet(nn.Module):
         self.refinement_blocks = nn.ModuleList()
         for i in range(len(embed_dims)):
             self.refinement_blocks.append(nn.Sequential(
-                VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]]),
+                VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]], channel_first=True),
             ))
 
         alpha_init_value = 0.5  # 融合权重初始值
@@ -534,7 +549,9 @@ class TokenSubNet(nn.Module):
                 B, N, C = tokens.shape
                 H = W = int(math.sqrt(N))
                 tokens_spatial.append(tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous())
-
+                # (B C H W)
+        else:
+            pass  # 已经是(B C H W)格式
         
         # 融合
         self._clamp_abs(self.alpha3.data, 1e-3)        
@@ -543,14 +560,19 @@ class TokenSubNet(nn.Module):
         self._clamp_abs(self.alpha0.data, 1e-3) 
 
         f0,f1,f2,f3 = tokens_spatial[0],tokens_spatial[1],tokens_spatial[2],tokens_spatial[3]  
+        
+        # # (64 64) (32 32) (16 16) (16 16)
+        # print('Token shapes in TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
+
         f0 = f0*self.alpha0 + self.refinement_blocks[0](self.upsample(f1))  
         f1 = f1*self.alpha1 + self.refinement_blocks[1](self.upsample(f2)+self.downsample(f0))  
-        f2 = f2*self.alpha2 + self.refinement_blocks[2](self.upsample(f3)+self.downsample(f1))  
-        f3 = f3*self.alpha3 + self.refinement_blocks[3](self.downsample(f2))  # f3最浅 f0最深
+        f2 = f2*self.alpha2 + self.refinement_blocks[2]((f3)+self.downsample(f1))  
+        f3 = f3*self.alpha3 + self.refinement_blocks[3]((f2))  # f3最浅 f0最深 
         tokens_spatial_list = [f0,f1,f2,f3]
 
-        
-        return tokens_spatial_list  # (B, H_i, W_i, self.embed_dim)
+        # print('Token shapes out TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
+
+        return tokens_spatial_list  # (B, self.embed_dim, H_i, W_i)
     
 
     def _clamp_abs(self, data, value):
@@ -612,7 +634,7 @@ class UnifiedTokenDecoder(nn.Module):
         self.token_dim = token_dim
         
         self.proj23 = nn.Sequential(
-            nn.conv(96,96,1,1),
+            nn.Conv2d(96,96,1,1),
             nn.InstanceNorm2d(96),
         )
         self.convblock23 = nn.Sequential(
@@ -622,7 +644,7 @@ class UnifiedTokenDecoder(nn.Module):
             )
         
         self.proj12 = nn.Sequential(
-            nn.conv(96,96,1,1),
+            nn.Conv2d(96,96,1,1),
             nn.InstanceNorm2d(96),
         )
         self.convblock12 = nn.Sequential(
@@ -632,7 +654,7 @@ class UnifiedTokenDecoder(nn.Module):
             )
 
         self.proj01 = nn.Sequential(
-            nn.conv(96,96,1,1),
+            nn.Conv2d(96,96,1,1),
             nn.InstanceNorm2d(96),
         )
         self.convblock01 = nn.Sequential(
@@ -648,11 +670,11 @@ class UnifiedTokenDecoder(nn.Module):
         # 上采样和卷积解码层
         self.decoder = nn.Sequential(
             # 64x64 -> 128x128
-            nn.ConvTranspose2d(96, 96, kernel_size=4, stride=2, padding=1, padding_mode='reflect'),
+            nn.ConvTranspose2d(96, 96, kernel_size=4, stride=2, padding=1),
             nn.InstanceNorm2d(96),
             
             # 128x128 -> 256x256  
-            nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1, padding_mode='reflect'),
+            nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1),
             nn.InstanceNorm2d(64),
             
             # 最终输出层
@@ -662,17 +684,14 @@ class UnifiedTokenDecoder(nn.Module):
         )
         
     def forward(self, tokens_list, x_in):
-        # tokens: (B, ref_H,ref_W, token_dim)
+        # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
         
         f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
-        # 转换tokens到feature map
-        f0 = f0.permute(0, 3, 1, 2).contiguous()
-        f1 = f1.permute(0, 3, 1, 2).contiguous()
-        f2 = f2.permute(0, 3, 1, 2).contiguous()
-        f3 = f3.permute(0, 3, 1, 2).contiguous()
+
+        # print('Token shapes in TokenDecoder:', f0.shape, f1.shape, f2.shape, f3.shape)
          
-        f3 = F.interpolate(f3, size=f2.shape[2:], mode='bilinear', align_corners=False)
+        # f3 = F.interpolate(f3, size=f2.shape[2:], mode='bilinear', align_corners=False)
         o23 = self.convblock23(self.proj23(f2 + f3))
 
         o23 = F.interpolate(o23, size=f1.shape[2:], mode='bilinear', align_corners=False)

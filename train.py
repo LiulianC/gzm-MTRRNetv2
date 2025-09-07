@@ -47,9 +47,9 @@ opts.sampler_size2 = 0
 opts.sampler_size3 = 800
 opts.test_size = [200,0,0]
 opts.epoch = 40
+opts.training = False # 训练模式 False为测试模式
 opts.model_path='./model_fit/model_latest.pth'  
-# opts.model_path=None  #如果要load就注释我
-opts.training = True # 训练模式 False为测试模式
+opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
 
@@ -63,6 +63,7 @@ model = MTRREngine(opts, device, training=opts.training)
 print("Applying improved initialization...")
 
 if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
+    opts.training = True # 训练模式 False为测试模式
     opts.epoch = 300
     opts.batch_size = 8
     opts.sampler_size1 = 0
