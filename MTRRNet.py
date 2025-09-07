@@ -445,15 +445,13 @@ class MTRRNet(nn.Module):
         # 2. 多尺度Token编码
         tokens_list = self.token_encoder(x_in)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
-
         
         # 3. Token SubNet融合
         fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
-        
+
         # 4. 统一解码：token → 6通道(T,R)
         out = self.token_decoder(fused_tokens, x_in)  # (B, 6, 256, 256)
-        
         
         return rmap, out
 
