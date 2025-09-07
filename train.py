@@ -49,12 +49,15 @@ opts.test_size = [200,0,0]
 opts.epoch = 40
 opts.model_path='./model_fit/model_latest.pth'  
 # opts.model_path=None  #如果要load就注释我
+opts.training = True # 训练模式 False为测试模式
+
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
+
 
 # nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train.log 2>&1 &
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = MTRREngine(opts, device)
+model = MTRREngine(opts, device, training=opts.training)
 # model.count_parameters()
 # 应用改进的初始化
 print("Applying improved initialization...")

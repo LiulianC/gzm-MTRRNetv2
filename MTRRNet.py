@@ -347,9 +347,10 @@ class MTRRNet(nn.Module):
     多尺度编码 → Token融合 → 统一解码
     频带分工：低频→Mamba，高频→Swin
     """
-    def __init__(self, use_legacy=False):
+    def __init__(self, use_legacy=False, training=True):
         super().__init__()
         self.use_legacy = use_legacy
+        self.training = training
         
         if use_legacy:
             # 使用旧实现的组件
@@ -373,7 +374,8 @@ class MTRRNet(nn.Module):
         self.token_encoder = MultiScaleTokenEncoder(
             embed_dims=[192, 192, 96, 96],    # 对应原encoder0~3的embed_dim  
             mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
-            swin_blocks=[4, 4, 4, 4]          # Swin处理高频
+            swin_blocks=[4, 4, 4, 4],          # Swin处理高频
+            training=self.training                      # 启用训练模式以支持随机失活
         )
         
         # Token SubNet：多尺度token融合
