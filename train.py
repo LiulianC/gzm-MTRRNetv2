@@ -4,12 +4,10 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import warnings
 import torch.nn.functional as F
-import torchvision.models as models
 from tqdm import tqdm
 import time
 from torchvision.utils import save_image 
 from multiprocessing import freeze_support
-import shutil
 import datetime
 import csv
 from torch.utils.data import ConcatDataset
@@ -22,7 +20,6 @@ from torch import amp
 scaler = amp.GradScaler()
 from set_seed import set_seed 
 import torch
-torch.autograd.set_detect_anomaly(True)
 
 
 warnings.filterwarnings('ignore')
@@ -146,13 +143,6 @@ if __name__ == '__main__':
     os.mkdir(output_dir7)
 
     # 定义优化器
-    # parameter_groups = [
-    #     {'params': [p for n, p in model.named_parameters() if 'proj.2.weight' in n], 'weight_decay': 0.01},  # PReLU参数
-    #     {'params': [p for n, p in model.named_parameters() if n.endswith('scale_raw')], 'weight_decay': 0.1},  # scale参数
-    #     {'params': [p for n, p in model.named_parameters() if 'alpha' in n], 'weight_decay': 0.05},  # alpha参数
-    #     {'params': [p for n, p in model.named_parameters() if not any(x in n for x in ['proj.2.weight', 'scale_raw', 'alpha'])], 'weight_decay': 0.0001}  # 其他参数
-    # ]
-    # optimizer = torch.optim.Adam(parameter_groups, lr=current_lr, betas=(0.5, 0.999), eps=1e-8, weight_decay=1e-5)
     norm_names = ['norm', 'bn', 'running_mean', 'running_var']
     decay, no_decay = [], []
     for n,p in model.netG_T.named_parameters():
