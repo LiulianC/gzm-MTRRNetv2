@@ -31,7 +31,7 @@ parser.add_argument("--host", type=bool, default="127.0.0.1")
 parser.add_argument("--port", default=57117)
 opts = parser.parse_args()
 opts.batch_size = 4
-opts.shuffle = False
+opts.shuffle = True
 opts.display_id = -1  
 opts.num_workers = 0
 
@@ -45,8 +45,9 @@ opts.sampler_size3 = 800
 opts.test_size = [200,0,0]
 opts.epoch = 40
 opts.training = False # 训练模式 False为测试模式
-opts.model_path='./model_fit/model_latest.pth'  
-opts.model_path=None  #如果要load就注释我
+# opts.model_path='./model_fit/model_latest.pth'  
+opts.model_path='./done/model_200.pth'  
+# opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
 
@@ -65,7 +66,7 @@ if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
     opts.batch_size = 8
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
-    opts.sampler_size3 = 100*opts.batch_size
+    opts.sampler_size3 = 50*opts.batch_size
     opts.test_size = [200,0,0]
     if opts.debug_monitor_layer_stats:
         os.remove('./debug/state.log') if os.path.exists('./debug/state.log') else None
@@ -84,8 +85,12 @@ tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVide
 tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
 tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True,if_align=True,real=False, HW=[256,256])
 
+root = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
+json_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
+VOCdataset = VOCJsonDataset(root, json_file, size=200, enable_transforms=True, HW=[256, 256])
+
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
-train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data])
+train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset])
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size, shuffle=opts.shuffle, num_workers = opts.num_workers, drop_last=False, pin_memory=True)
 
 
@@ -99,7 +104,11 @@ test_data2 = TestDataset(datadir=test_data_dir2, fns='/home/gzm/gzm-MTRRVideo/da
 test_data_dir3 = '/home/gzm/gzm-RDNet1/dataset/laparoscope_gen'
 test_data3 = DSRTestDataset(datadir=test_data_dir3, fns='/home/gzm/gzm-RDNet1/dataset/laparoscope_gen_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[2])
 
-test_data = ConcatDataset([test_data1, test_data2, test_data3])
+root1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
+json_file1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
+VOCdataset1 = VOCJsonDataset(root1, json_file1, size=80, enable_transforms=True, HW=[256, 256])
+
+test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1])
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
 
 
@@ -394,7 +403,7 @@ if __name__ == '__main__':
                     save_image(test_rcmaps_List_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_Rcmaps_List.png'), nrow=4)
 
                 total_test_step += 1
-                test_pbar.set_postfix({'loss':loss.item,'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
+                test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
                 test_pbar.update(1)
 
 
@@ -434,7 +443,7 @@ if __name__ == '__main__':
         # 早停检查
         early_stopping(avg_test_loss)
         if early_stopping.early_stop:
-            print(f"Early stopping triggered at epoch {i}!")
+            print(f"Early stopping triggered at epoch {i}!") 
             break
 
         if avg_test_loss<min_loss:

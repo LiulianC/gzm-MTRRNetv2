@@ -522,3 +522,94 @@ class FusionDataset(BaseDataset):
 
     def __len__(self):
         return self.size
+
+
+
+
+
+
+
+
+
+import json
+from torch.utils.data import Dataset
+import torchvision.transforms as T
+
+
+class VOCJsonDataset(Dataset):
+    def __init__(self, datadir, json_file, size=None, enable_transforms=False, 
+                 unaligned_transforms=False, round_factor=32, flag=None, 
+                 if_align=True, real=False, HW=[256, 256]):
+        """
+        datadir: 图像根目录 (/home/gzm/gzm-RDNet1/dataset/VOC2012)
+        json_file: VOC_results_list.json
+        size: 采样的样本数 (None 表示全部)
+        enable_transforms: 是否做数据增强
+        unaligned_transforms: 是否做不对齐的增强 (例如随机裁剪)
+        round_factor: 调整尺寸时按多少取整 (默认32)
+        flag: 额外的标记字典
+        if_align: 是否强制对齐图像大小
+        real: 是否为真实数据 (调试用)
+        HW: 输出图像的目标高宽
+        """
+        super().__init__()
+        self.datadir = datadir
+        self.size = size
+        self.enable_transforms = enable_transforms
+        self.unaligned_transforms = unaligned_transforms
+        self.round_factor = round_factor
+        self.flag = flag
+        self.if_align = if_align
+        self.real = real
+        self.HW = HW
+
+        # 读取 JSON
+        with open(json_file, "r") as f:
+            self.samples = json.load(f)
+
+        # 采样
+        if size is not None and size > 0 and size <= len(self.samples):
+            self.samples = random.sample(self.samples, size)
+
+    def align(self, *imgs):
+        """统一图像大小"""
+        h, w = self.HW
+        # 保证尺寸是 round_factor 的倍数
+        h = h // self.round_factor * self.round_factor
+        w = w // self.round_factor * self.round_factor
+        return [img.resize((w, h)) for img in imgs]
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        filename = os.path.basename(sample["blended"]).replace(".png", "")
+
+        # 路径拼接
+        transmission_path = os.path.join(self.datadir, "transmission_layer", sample["transmission_layer"])
+        reflection_path = os.path.join(self.datadir, "reflection_layer", sample["reflection_layer"])
+        blended_path = os.path.join(self.datadir, "blended", sample["blended"])
+
+        # 打开图片
+        t_img = Image.open(transmission_path).convert("RGB")
+        r_img = Image.open(reflection_path).convert("RGB")
+        b_img = Image.open(blended_path).convert("RGB")
+
+        # 数据增强 (这里留接口给你)
+        if self.enable_transforms:
+            t_img, b_img, r_img = paired_data_transforms(t_img, b_img, r_img, self.unaligned_transforms)
+
+        # 尺寸对齐
+        if self.if_align:
+            t_img, r_img, b_img = self.align(t_img, r_img, b_img)
+
+        # 转 Tensor
+        T_tensor = TF.to_tensor(t_img)
+        R_tensor = TF.to_tensor(r_img)
+        B_tensor = TF.to_tensor(b_img)
+
+        dic = {'input': B_tensor, 'target_t': T_tensor, 'fn': filename, 'real': self.real, 'target_r': R_tensor}
+
+        return dic
+    
+
+    def __len__(self):
+        return len(self.samples)
