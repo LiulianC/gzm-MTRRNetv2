@@ -6,11 +6,14 @@ import pathlib
 import torch
 import importlib
 import argparse
+from datetime import datetime
+import time
+
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input", type=str, default='./data/med1.mp4', help="输入文件路径")
+parser.add_argument("--input", type=str, default='./data/med3.mp4', help="输入文件路径")
 parser.add_argument("--output", type=str, default='./test_results', help="输出文件夹")
-parser.add_argument("--model", type=str, default='MTRRNet', help="模型名称")
+parser.add_argument("--model", type=str, default='MTRRNet', help="模型文件名称")
 parser.add_argument("--ckptpath", type=str, default='./done/model_200.pth', help="权重文件路径")
 parser.add_argument("--batchsize", type=int, default=8, help="batch大小")
 args = parser.parse_args()
@@ -59,6 +62,13 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, bat
     """支持任意 batchsize 的逐帧推理"""
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_dir = os.path.join(output_dir, current_time)
+    os.makedirs(output_dir, exist_ok=True)
+
+    frame_result_dir = os.path.join(output_dir, 'frames')
+    os.makedirs(frame_result_dir, exist_ok=True)
+    
     results = []
     data = {}
     with torch.no_grad():
@@ -91,7 +101,7 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, bat
                 results.append(img)
 
                 # 保存单帧
-                frame_path = os.path.join(output_dir, f"frame_{start+idx:05d}.png")
+                frame_path = os.path.join(frame_result_dir, f"frame_{start+idx:05d}.png")
                 img.save(frame_path)
 
     # 合成视频
@@ -118,9 +128,11 @@ def main_worker():
     else:
         raise ValueError("输入必须是视频mp4或帧zip")
 
+    time1 = time.time()
     # 这里 batch_size 可以是任意数值，不需要和模型写死
     evaluate_batch_model(frames, model, device, args.output, fps=default_fps, batch_size=args.batchsize)
-
+    time2 = time.time()
+    print(f"总耗时: {time2-time1:.2f} 秒, 平均每帧: {(time2-time1)/len(frames):.4f} 秒")
 
 if __name__ == "__main__":
     main_worker()

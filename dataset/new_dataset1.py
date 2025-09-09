@@ -533,7 +533,6 @@ class FusionDataset(BaseDataset):
 
 import json
 from torch.utils.data import Dataset
-import torchvision.transforms as T
 
 
 class VOCJsonDataset(Dataset):
@@ -613,3 +612,83 @@ class VOCJsonDataset(Dataset):
 
     def __len__(self):
         return len(self.samples)
+
+
+
+
+
+class HyperKDataset(Dataset):
+    def __init__(self, root="./EndoData", start=343, end=372, size=None, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None):
+        super(HyperKDataset, self).__init__()
+        self.root = root
+        self.start = start
+        self.end = end
+        self.size = size
+        self.enable_transforms = enable_transforms
+        self.unaligned_transforms = unaligned_transforms
+        self.if_align = if_align
+        self.HW = HW
+        self.flag = flag
+        self.real = True
+
+        self.I_paths = []  # 输入
+        self.T_paths = []  # 标签
+
+        # 遍历编号
+        for idx in range(start, end + 1):
+            folder_name = f"hyperK_{idx:03d}"
+            input_dir = os.path.join(root, folder_name, "input")
+            label_dir = os.path.join(root, folder_name, "label")
+
+            if not os.path.exists(input_dir) or not os.path.exists(label_dir):
+                print(f"⚠️ 跳过 {folder_name}, input 或 label 不存在")
+                continue
+
+            input_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".png")]
+            for fname in input_files:
+                input_path = os.path.join(input_dir, fname)
+                label_path = os.path.join(label_dir, fname)
+                if os.path.exists(label_path):
+                    self.I_paths.append(input_path)
+                    self.T_paths.append(label_path)
+                else:
+                    print(f"⚠️ 没找到匹配的标签: {label_path}")
+
+        # 随机抽样
+        if size == 0:
+            self.I_paths, self.T_paths = [], []
+        elif size is not None and size <= len(self.I_paths):
+            zipped = list(zip(self.I_paths, self.T_paths))
+            sampled = random.sample(zipped, size)
+            self.I_paths, self.T_paths = zip(*sampled)
+
+    def align(self, x1, x2):
+        h, w = self.HW
+        h, w = h // 32 * 32, w // 32 * 32
+        x1 = x1.resize((w, h))
+        x2 = x2.resize((w, h))
+        return x1, x2
+
+    def __getitem__(self, index):
+        filename = os.path.basename(self.I_paths[index]).replace(".png", "")
+
+        m_img = Image.open(self.I_paths[index]).convert("RGB")
+        t_img = Image.open(self.T_paths[index]).convert("RGB")
+        r_img = Image.fromarray(np.clip(np.array(m_img, dtype=np.float32) - np.array(t_img, dtype=np.float32), 0, 255).astype(np.uint8))
+
+        if self.enable_transforms:
+            t_img, m_img, r_img = paired_data_transforms(t_img, m_img, r_img, self.unaligned_transforms)
+
+        if self.if_align:
+            t_img, m_img, r_img = self.align(t_img, m_img, r_img)
+
+        T = TF.to_tensor(t_img)
+        M = TF.to_tensor(m_img)
+        R = TF.to_tensor(r_img)
+
+        dic = {'input': M, 'target_t': T, 'fn': filename, 'real': self.real, 'target_r': R}
+
+        return dic
+
+    def __len__(self):
+        return len(self.I_paths)

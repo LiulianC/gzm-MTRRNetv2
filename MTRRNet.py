@@ -437,7 +437,6 @@ class MTRRNet(nn.Module):
     
     def _forward_token_only(self, x_in):
         """Token-only版本的前向传播"""
-        B = x_in.shape[0]
         
         # 1. RDM提取反光先验（保持与原架构兼容）
         rmap, _, _, _ = self.rdm(x_in)  # rmap: (B, 3, 256, 256)
@@ -447,6 +446,7 @@ class MTRRNet(nn.Module):
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
         # 3. Token SubNet融合
+        tokens_list = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
         fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
 
