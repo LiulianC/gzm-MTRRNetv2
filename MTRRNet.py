@@ -2,21 +2,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba_ssm import Mamba
-from timm.models.vision_transformer import PatchEmbed
-from timm.models.swin_transformer import SwinTransformerBlock
-from timm.layers import DropPath
 from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from classifier import PretrainedConvNext_e2e
-# from nafblock import NAFBlock
-import torch.utils.checkpoint as checkpoint
 import math
-from timm.layers import LayerNorm2d
-import os
+import tabulate
 
 
 # padding是边缘复制 减少边框伪影
@@ -407,11 +400,15 @@ class MTRRNet(nn.Module):
         )
         
         # Token SubNet：多尺度token融合
-        self.token_subnet = TokenSubNet(
+        self.token_subnet1 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
             mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
         )
-        
+        self.token_subnet2 = TokenSubNet(
+            embed_dims=[96, 96, 96, 96],         # 融合后的token维度
+            mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
+        )
+
         # 统一Token解码器
         self.token_decoder = UnifiedTokenDecoder(
             token_dim=96,         # 输入token维度
@@ -446,8 +443,9 @@ class MTRRNet(nn.Module):
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
         # 3. Token SubNet融合
-        tokens_list = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        # fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        fused_tokens = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
 
         # 4. 统一解码：token → 6通道(T,R)
@@ -620,6 +618,144 @@ class MTRREngine(nn.Module):
                 total += num
         print(tabulate(table, headers=["Layer", "Size", "Formatted"], tablefmt="grid"))
         print(f"\nTotal trainable parameters: {total:,}")    
+
+    # 微调代码
+    def _set_requires_grad(self, module, flag: bool):
+        if module is None:
+            return
+        for p in module.parameters():
+            p.requires_grad = flag
+
+    def _split_decay(self, named_params):
+        """按是否权重衰减拆分参数（与现有规则保持一致）"""
+        decay, no_decay = [], []
+        for n, p in named_params:
+            if not p.requires_grad:
+                continue
+            if (p.dim() == 1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma', 'norm', 'bn', 'running_mean', 'running_var']):
+                no_decay.append(p)
+            else:
+                decay.append(p)
+        return decay, no_decay
+
+    def build_finetune_param_groups(self, opts):
+        """
+        根据微调模式构建参数组（仅当 opts.enable_finetune=True 时使用）：
+        - 模块：
+            encoder = token_encoder
+            subnet  = token_subnet
+            decoder = token_decoder
+            rdm     = rdm（默认不训练）
+        - ft_mode:
+            'decoder_only'   仅解码器
+            'freeze_encoder' 冻结编码器，训练 subnet + decoder（推荐作为第一阶段）
+            'freeze_decoder' 冻结解码器，训练 encoder + subnet
+            'all'            全部训练（后期收敛）
+        - 学习率倍率：
+            lr_mult_encoder / lr_mult_subnet / lr_mult_decoder
+        """
+        base_lr = getattr(opts, 'base_lr', 1e-4)
+        wd      = getattr(opts, 'weight_decay', 1e-4)
+        ft_mode = getattr(opts, 'ft_mode', 'freeze_encoder')
+        lr_me   = getattr(opts, 'lr_mult_encoder', 0.1)
+        lr_ms   = getattr(opts, 'lr_mult_subnet', 0.5)
+        lr_md   = getattr(opts, 'lr_mult_decoder', 1.0)
+        train_rdm = bool(getattr(opts, 'train_rdm', False))
+
+        enc = getattr(self.netG_T, 'token_encoder', None)
+        sub = getattr(self.netG_T, 'token_subnet',  None)
+        dec = getattr(self.netG_T, 'token_decoder', None)
+        rdm = getattr(self.netG_T, 'rdm',           None)
+
+        # 1) 冻结/解冻
+        if ft_mode == 'decoder_only':
+            self._set_requires_grad(enc, False)
+            self._set_requires_grad(sub, False)
+            self._set_requires_grad(dec, True)
+        elif ft_mode == 'freeze_encoder':
+            self._set_requires_grad(enc, False)
+            self._set_requires_grad(sub, True)
+            self._set_requires_grad(dec, True)
+        elif ft_mode == 'freeze_decoder':
+            self._set_requires_grad(enc, True)
+            self._set_requires_grad(sub, True)
+            self._set_requires_grad(dec, False)
+        elif ft_mode == 'all':
+            self._set_requires_grad(enc, True)
+            self._set_requires_grad(sub, True)
+            self._set_requires_grad(dec, True)
+        else:
+            # 兜底：等价 freeze_encoder
+            self._set_requires_grad(enc, False)
+            self._set_requires_grad(sub, True)
+            self._set_requires_grad(dec, True)
+
+        # RDM 默认不训练
+        self._set_requires_grad(rdm, train_rdm)
+
+        # 2) 组装参数组（每个模块各自拆 decay/no_decay，设置不同 lr）
+        param_groups = []
+
+        if enc is not None:
+            decay, no_decay = self._split_decay(enc.named_parameters())
+            if decay:
+                param_groups.append({'name': 'encoder_decay', 'params': decay, 'weight_decay': wd, 'lr': base_lr * lr_me, 'initial_lr': base_lr * lr_me})
+            if no_decay:
+                param_groups.append({'name': 'encoder_no_decay', 'params': no_decay, 'weight_decay': 0.0, 'lr': base_lr * lr_me, 'initial_lr': base_lr * lr_me})
+
+        if sub is not None:
+            decay, no_decay = self._split_decay(sub.named_parameters())
+            if decay:
+                param_groups.append({'name': 'subnet_decay', 'params': decay, 'weight_decay': wd, 'lr': base_lr * lr_ms, 'initial_lr': base_lr * lr_ms})
+            if no_decay:
+                param_groups.append({'name': 'subnet_no_decay', 'params': no_decay, 'weight_decay': 0.0, 'lr': base_lr * lr_ms, 'initial_lr': base_lr * lr_ms})
+
+        if dec is not None:
+            decay, no_decay = self._split_decay(dec.named_parameters())
+            if decay:
+                param_groups.append({'name': 'decoder_decay', 'params': decay, 'weight_decay': wd, 'lr': base_lr * lr_md, 'initial_lr': base_lr * lr_md})
+            if no_decay:
+                param_groups.append({'name': 'decoder_no_decay', 'params': no_decay, 'weight_decay': 0.0, 'lr': base_lr * lr_md, 'initial_lr': base_lr * lr_md})
+
+        if train_rdm and rdm is not None:
+            decay, no_decay = self._split_decay(rdm.named_parameters())
+            if decay:
+                param_groups.append({'name': 'rdm_decay', 'params': decay, 'weight_decay': wd, 'lr': base_lr * 0.05, 'initial_lr': base_lr * 0.05})
+            if no_decay:
+                param_groups.append({'name': 'rdm_no_decay', 'params': no_decay, 'weight_decay': 0.0, 'lr': base_lr * 0.05, 'initial_lr': base_lr * 0.05})
+
+        # 记录初始 lr 供 warmup 使用
+        self._ft_param_groups_meta = [{'name': g.get('name', ''), 'initial_lr': g.get('initial_lr', g.get('lr', base_lr))} for g in param_groups]
+        return param_groups
+
+    def progressive_unfreeze(self, epoch, opts):
+        """
+        渐进解冻（字符串计划，如 "10:encoder,20:all"）
+        到点即打开对应模块的 requires_grad
+        """
+        plan = getattr(opts, 'unfreeze_plan', '')
+        if not plan:
+            return
+        items = [x.strip() for x in plan.split(',') if ':' in x]
+        for it in items:
+            try:
+                ep, target = it.split(':')
+                ep = int(ep)
+            except:
+                continue
+            if epoch == ep:
+                if target == 'encoder':
+                    self._set_requires_grad(getattr(self.netG_T, 'token_encoder', None), True)
+                elif target == 'decoder':
+                    self._set_requires_grad(getattr(self.netG_T, 'token_decoder', None), True)
+                elif target == 'subnet':
+                    self._set_requires_grad(getattr(self.netG_T, 'token_subnet',  None), True)
+                elif target == 'all':
+                    self._set_requires_grad(getattr(self.netG_T, 'token_encoder', None), True)
+                    self._set_requires_grad(getattr(self.netG_T, 'token_subnet',  None), True)
+                    self._set_requires_grad(getattr(self.netG_T, 'token_decoder', None), True)
+
+
 
     # @staticmethod
     # def init_weights(m):

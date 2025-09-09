@@ -543,14 +543,15 @@ class TokenSubNet(nn.Module):
     
     def forward(self, tokens_list):
         # tokens_list: [t0, t1, t2, t3] 每个是 (B, N_i, C_i)
+        tokens_spatial = []
         if tokens_list[0].ndim == 3:  # 3维张量
-            tokens_spatial = []
             for i, tokens in enumerate(tokens_list):
                 B, N, C = tokens.shape
                 H = W = int(math.sqrt(N))
                 tokens_spatial.append(tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous())
                 # (B C H W)
         else:
+            tokens_spatial = tokens_list
             pass  # 已经是(B C H W)格式
         
         # 融合

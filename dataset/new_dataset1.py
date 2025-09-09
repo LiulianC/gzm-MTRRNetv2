@@ -567,7 +567,9 @@ class VOCJsonDataset(Dataset):
             self.samples = json.load(f)
 
         # 采样
-        if size is not None and size > 0 and size <= len(self.samples):
+        if size == 0:
+            self.samples = []
+        elif size is not None and size > 0 and size <= len(self.samples):
             self.samples = random.sample(self.samples, size)
 
     def align(self, *imgs):
@@ -618,7 +620,9 @@ class VOCJsonDataset(Dataset):
 
 
 class HyperKDataset(Dataset):
-    def __init__(self, root="./EndoData", start=343, end=372, size=None, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None):
+    def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
+                 enable_transforms=False, unaligned_transforms=False,
+                 if_align=True, HW=[256,256], flag=None):
         super(HyperKDataset, self).__init__()
         self.root = root
         self.start = start
@@ -634,6 +638,13 @@ class HyperKDataset(Dataset):
         self.I_paths = []  # 输入
         self.T_paths = []  # 标签
 
+        # 读取 test.json
+        json_path = json_path
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"❌ 找不到 {json_path}")
+        with open(json_path, "r") as f:
+            limits = json.load(f)  # dict, e.g. {"hyperK_343": 1982, ...}
+
         # 遍历编号
         for idx in range(start, end + 1):
             folder_name = f"hyperK_{idx:03d}"
@@ -644,7 +655,12 @@ class HyperKDataset(Dataset):
                 print(f"⚠️ 跳过 {folder_name}, input 或 label 不存在")
                 continue
 
-            input_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".png")]
+            # 限制数量
+            limit = limits.get(folder_name, None)
+            input_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".png")])
+            if limit is not None:
+                input_files = input_files[:limit]
+
             for fname in input_files:
                 input_path = os.path.join(input_dir, fname)
                 label_path = os.path.join(label_dir, fname)
@@ -662,12 +678,13 @@ class HyperKDataset(Dataset):
             sampled = random.sample(zipped, size)
             self.I_paths, self.T_paths = zip(*sampled)
 
-    def align(self, x1, x2):
+    def align(self, x1, x2, x3):
         h, w = self.HW
         h, w = h // 32 * 32, w // 32 * 32
         x1 = x1.resize((w, h))
         x2 = x2.resize((w, h))
-        return x1, x2
+        x3 = x3.resize((w, h))
+        return x1, x2, x3
 
     def __getitem__(self, index):
         filename = os.path.basename(self.I_paths[index]).replace(".png", "")

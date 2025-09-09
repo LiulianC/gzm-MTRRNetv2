@@ -19,7 +19,6 @@ from dataset.new_dataset1 import *
 from torch import amp
 scaler = amp.GradScaler()
 from set_seed import set_seed 
-import torch
 
 
 warnings.filterwarnings('ignore')
@@ -35,19 +34,37 @@ opts.shuffle = True
 opts.display_id = -1  
 opts.num_workers = 0
 
-opts.always_print = 1
+opts.enable_finetune = False  # 是否开启微调
+if opts.enable_finetune:
+    # 微调模式：decoder_only / freeze_encoder / freeze_decoder / all
+    opts.ft_mode = getattr(opts, 'ft_mode', 'freeze_encoder')
+    # 以解码器为基准学习率（建议 1e-5~1e-4；你原逻辑里有“lr不能太大”的注释，保守取 1e-5 更稳）
+    opts.base_lr = getattr(opts, 'base_lr', 1e-5)
+    opts.weight_decay = getattr(opts, 'weight_decay', 1e-4)
+    # 判别式学习率倍率
+    opts.lr_mult_encoder = getattr(opts, 'lr_mult_encoder', 0.1)
+    opts.lr_mult_subnet  = getattr(opts, 'lr_mult_subnet',  0.5)
+    opts.lr_mult_decoder = getattr(opts, 'lr_mult_decoder', 1.0)
+    # 是否训练 RDM（默认不训）
+    opts.train_rdm = getattr(opts, 'train_rdm', False)
+    # 线性 warmup 的 epoch 数（0 表示不开）
+    opts.warmup_epochs = getattr(opts, 'warmup_epochs', 3)
+    # 渐进解冻计划（空字符串表示不开）
+    opts.unfreeze_plan = getattr(opts, 'unfreeze_plan', '10:all')
+
+opts.always_print = 0
 opts.debug_monitor_layer_stats = 1 # debug模式开启时 epoch和size都要为1 要load模型 可同时打开
 opts.debug_monitor_layer_grad = 1 # # debug模式开启时 epoch和size都要为1 要load模型bash
 opts.draw_attention_map = False # 注册cbam钩子 画注意力热力图 训练数据集要改 epoch和size都要为1 要load模型 batchsize要改1
 opts.sampler_size1 = 0
 opts.sampler_size2 = 0
-opts.sampler_size3 = 800
-opts.test_size = [200,0,0]
+opts.sampler_size3 = 80
+opts.test_size = [20,0,0]
 opts.epoch = 40
 opts.training = False # 训练模式 False为测试模式
-opts.model_path='./model_fit/model_latest.pth'  
+# opts.model_path='./model_fit/model_latest.pth'  
 # opts.model_path='./done/model_200.pth'  
-# opts.model_path=None  #如果要load就注释我
+opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
 
@@ -63,11 +80,11 @@ print("Applying improved initialization...")
 if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
     opts.training = True # 训练模式 False为测试模式
     opts.epoch = 300
-    opts.batch_size = 8
+    opts.batch_size = 16
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
-    opts.sampler_size3 = 0
-    opts.test_size = [0,0,0]
+    opts.sampler_size3 = 800
+    opts.test_size = [200,0,0]
     if opts.debug_monitor_layer_stats:
         os.remove('./debug/state.log') if os.path.exists('./debug/state.log') else None
         model.monitor_layer_stats()# 注册
@@ -87,10 +104,11 @@ tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/dat
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
-VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=800, enable_transforms=True, HW=[256, 256])
+VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=400, enable_transforms=False, HW=[256, 256])
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
-HyperK_data = HyperKDataset(root=HyperKroot, start=343, end=369, size=None, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=12800, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -109,10 +127,13 @@ test_data3 = DSRTestDataset(datadir=test_data_dir3, fns='/home/gzm/gzm-RDNet1/da
 
 VOCroot1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
-VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=80, enable_transforms=True, HW=[256, 256])
+VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=0, enable_transforms=True, HW=[256, 256])
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
-HyperK_data_test = HyperKDataset(root=HyperKroot_test, start=369, end=372, size=None, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
+HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=200, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+
+# print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
 test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test])
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
@@ -158,18 +179,23 @@ if __name__ == '__main__':
     os.mkdir(output_dir7)
 
     # 定义优化器
-    norm_names = ['norm', 'bn', 'running_mean', 'running_var']
-    decay, no_decay = [], []
-    for n,p in model.netG_T.named_parameters():
-        if (p.dim()==1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma','norm','bn']):
-            no_decay.append(p)
-        else:
-            decay.append(p)
-    optimizer = torch.optim.Adam([
-    {'params': no_decay, 'weight_decay': 0.0},
-    {'params': decay, 'weight_decay': 1e-4},
-    ], lr=current_lr, betas=(0.5,0.999), eps=1e-8)
-
+    if opts.enable_finetune:
+        # 使用引擎提供的分组/冻结策略 微调
+        param_groups = model.build_finetune_param_groups(opts)
+        optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
+    else:
+        # 日常训练
+        norm_names = ['norm', 'bn', 'running_mean', 'running_var']
+        decay, no_decay = [], []
+        for n, p in model.netG_T.named_parameters():
+            if (p.dim() == 1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma', 'norm', 'bn']):
+                no_decay.append(p)
+            else:
+                decay.append(p)
+        optimizer = torch.optim.Adam([
+            {'params': no_decay, 'weight_decay': 0.0},
+            {'params': decay,    'weight_decay': 1e-4},
+        ], lr=current_lr, betas=(0.5, 0.999), eps=1e-8)
 
 
     # 定义学习率调度器
@@ -177,7 +203,7 @@ if __name__ == '__main__':
         optimizer,
         mode='min',           # 监控的 quantity 是 loss，我们希望它减小
         factor=0.5,           # 学习率乘以 0.5
-        patience=7,           # 等待 4 个 epoch 没有 improvement 后才触发 LR 衰减
+        patience=6,           # 等待 4 个 epoch 没有 improvement 后才触发 LR 衰减
         threshold=1e-4,       # 可选：认为 loss 没有显著下降的阈值
         threshold_mode='rel', # 使用相对阈值
         cooldown=0,           # 每次衰减后冷却期（可不设）
@@ -186,7 +212,7 @@ if __name__ == '__main__':
     )
 
     # 定义早停
-    early_stopping = EarlyStopping(patience=20, delta=1e-4, verbose=True)
+    early_stopping = EarlyStopping(patience=10, delta=1e-4, verbose=True)
 
     # 网络load 以及继承上次的epoch和学习参数
     if opts.model_path is not None and os.path.exists(opts.model_path):
@@ -220,7 +246,27 @@ if __name__ == '__main__':
             ncols=170,  # 建议宽度根据指标数量调整
             dynamic_ncols=False,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
-        )        
+        )      
+
+
+        # —— 微调线性 warmup（前 warmup_epochs 轮，按各组 initial_lr 线性拉升）——
+        if opts.enable_finetune and getattr(opts, 'warmup_epochs', 0) > 0 and i < opts.warmup_epochs:
+            # 线性比例（第 1~warmup_epochs 轮从 1/warmup_epochs → 1.0）
+            warmup_scale = float(i + 1) / float(max(1, opts.warmup_epochs))
+            # 只有在 build_finetune_param_groups 调用过后才会有 _ft_param_groups_meta
+            meta = getattr(model, '_ft_param_groups_meta', [])
+            # 按记录的 initial_lr 缩放每个 param_group 的 lr（不改 weight_decay 等其他设置）
+            if meta and len(meta) == len(optimizer.param_groups):
+                for gi in range(len(optimizer.param_groups)):
+                    base_lr_i = meta[gi]['initial_lr']
+                    optimizer.param_groups[gi]['lr'] = base_lr_i * warmup_scale
+
+        # —— 渐进解冻（到点再开，避免一开始全量训练不稳）——
+        if opts.enable_finetune:
+            model.progressive_unfreeze(i, opts)        
+
+
+
         for t, data1 in enumerate(train_pbar):
             # print('\n')
             # print('input mean:',data1['input'].mean())
