@@ -393,7 +393,7 @@ class MTRRNet(nn.Module):
         # 多尺度Token编码器
         self.token_encoder = MultiScaleTokenEncoder(
             embed_dims=[96, 96, 96, 96],    # 对应原encoder0~3的embed_dim  
-            mamba_blocks=[5, 5, 5, 5],    # Mamba处理低频
+            mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
             drop_branch_prob=0.2,
             training=self.training                      # 启用训练模式以支持随机失活
@@ -402,11 +402,11 @@ class MTRRNet(nn.Module):
         # Token SubNet：多尺度token融合
         self.token_subnet1 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
-            mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
+            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
         )
         self.token_subnet2 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
-            mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
+            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
         )
 
         # 统一Token解码器
@@ -469,7 +469,7 @@ class MTRREngine(nn.Module):
         # self.netG_T.apply(self.init_weights)
         self.net_c = PretrainedConvNext_e2e("convnext_small_in22k").cuda()
         # print(torch.load('./pretrained/cls_model.pth', map_location=str(self.device)).keys())
-        self.net_c.load_state_dict(torch.load('/home/gzm/gzm-MTRRVideo/cls/cls_models/clsbest.pth', map_location=str(self.device)))
+        self.net_c.load_state_dict(torch.load('/home/gzm/gzm-MTRRNetv2/cls/cls_models/clsbest.pth', map_location=str(self.device)))
         self.net_c.eval()  # 预训练模型不需要训练        
 
 
@@ -754,51 +754,6 @@ class MTRREngine(nn.Module):
                     self._set_requires_grad(getattr(self.netG_T, 'token_encoder', None), True)
                     self._set_requires_grad(getattr(self.netG_T, 'token_subnet',  None), True)
                     self._set_requires_grad(getattr(self.netG_T, 'token_decoder', None), True)
-
-
-
-    # @staticmethod
-    # def init_weights(m):
-    #     # 通用卷积层
-    #     if isinstance(m, (nn.Conv2d, nn.Conv1d)):
-    #         nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-    #         if m.bias is not None:
-    #             nn.init.zeros_(m.bias)
-    #     # 通用线性层
-    #     elif isinstance(m, nn.Linear):
-    #         nn.init.xavier_uniform_(m.weight)
-    #         if m.bias is not None:
-    #             nn.init.zeros_(m.bias)
-    #     # LayerNorm和BatchNorm
-    #     elif isinstance(m, nn.LayerNorm):
-    #         if m.weight is not None:
-    #             nn.init.ones_(m.weight)
-    #         if m.bias is not None:
-    #             nn.init.zeros_(m.bias)
-    #     elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm)):
-    #         if m.weight is not None:
-    #             nn.init.ones_(m.weight)
-    #         if m.bias is not None:
-    #             nn.init.zeros_(m.bias)
-    #     # PReLU特殊初始化 - 避免梯度不稳定
-    #     elif isinstance(m, nn.PReLU):
-    #         # 使用保守的小正值初始化PReLU参数，避免过大的负斜率
-    #         nn.init.uniform_(m.weight, 0.05, 0.1)
-
-    #     # 针对自定义模块/参数名
-    #     for name, param in m.named_parameters(recurse=False):
-    #         # 常见proj和自定义权重
-    #         if any([k in name.lower() for k in ['proj', 'out_proj', 'x_proj', 'conv', 'weight']]):
-    #             if param.dim() >= 2:  # 只初始化权重，不初始化bias
-    #                 # 用xavier对proj类参数更稳妥
-    #                 nn.init.xavier_uniform_(param)
-    #             elif param.dim() == 1:  # bias或者norm的weight
-    #                 if 'bias' in name or 'beta' in name:
-    #                     nn.init.zeros_(param)
-    #                 elif 'weight' in name or 'gamma' in name:
-    #                     nn.init.ones_(param)
-            
-            
     
 
 # --------------------------

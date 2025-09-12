@@ -8,14 +8,15 @@ import importlib
 import argparse
 from datetime import datetime
 import time
-
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--input", type=str, default='./data/med3.mp4', help="输入文件路径")
+# parser.add_argument("--input", type=str, default='/home/gzm/gzm-compare/dataset/JPEGImages/hyperK_000.zip', help="输入文件路径")
+parser.add_argument("--input", type=str, default='./data/med20mins.mp4', help="输入文件路径")
 parser.add_argument("--output", type=str, default='./test_results', help="输出文件夹")
 parser.add_argument("--model", type=str, default='MTRRNet', help="模型文件名称")
-parser.add_argument("--ckptpath", type=str, default='./done/model_200.pth', help="权重文件路径")
-parser.add_argument("--batchsize", type=int, default=8, help="batch大小")
+parser.add_argument("--ckptpath", type=str, default='./model_fit/model_latest.pth', help="权重文件路径")
+parser.add_argument("--batchsize", type=int, default=16, help="batch大小")
 args = parser.parse_args()
 default_fps = 30
 
@@ -46,20 +47,27 @@ def read_frames_from_zip(zip_path, zip_reader, target_size=None):
         frames.append(img)
     return frames, zfilelist
 
-def save_video(frames, save_path, fps=default_fps):
+def save_video(frames, save_path, fps=24):
     """保存帧列表为视频"""
     if len(frames) == 0:
         raise ValueError("没有帧可保存")
 
-    h, w = frames[0].size
-    writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (h, w))
-    for f in frames:
+    w, h = frames[0].size   # PIL.Image.size -> (宽, 高)
+    writer = cv2.VideoWriter(
+        save_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (w, h)
+    )
+
+    for f in tqdm(frames, desc="Saving video"):
         arr = np.array(f).astype(np.uint8)
         writer.write(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
     writer.release()
 
-def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, batch_size=8):
-    """支持任意 batchsize 的逐帧推理"""
+
+def evaluate_batch_model(frames, model, device, output_dir, fps=24, batch_size=8):
+    """支持任意 batchsize 的逐帧推理并保存结果视频"""
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -72,7 +80,7 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, bat
     results = []
     data = {}
     with torch.no_grad():
-        for start in range(0, len(frames), batch_size):
+        for start in tqdm(range(0, len(frames), batch_size), desc="Processing frames"):
             end = min(start + batch_size, len(frames))
             batch_frames = frames[start:end]
 
@@ -84,11 +92,14 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, bat
                 inp.append(arr)
             inp = torch.stack(inp, dim=0).to(device)  # [B,3,H,W]
 
-            # print('inp shape:', inp.shape)
-            # 送进模型 (即插即用)
-            data = {'input': inp, 'target_t': torch.zeros_like(inp), 'target_r': torch.zeros_like(inp)}
+            # 送进模型
+            data = {
+                'input': inp,
+                'target_t': torch.zeros_like(inp),
+                'target_r': torch.zeros_like(inp)
+            }
             model.set_input(data)
-            model.inference()   # [B,3,H,W]
+            model.inference()
             visual_result = model.get_current_visuals()
             out = visual_result['fake_T']
 
@@ -104,9 +115,10 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=default_fps, bat
                 frame_path = os.path.join(frame_result_dir, f"frame_{start+idx:05d}.png")
                 img.save(frame_path)
 
-    # 合成视频
-    save_video(results, os.path.join(output_dir, "result.mp4"), fps=fps)
-    print(f"处理完成，结果保存在 {output_dir}")
+    # 保存最终视频
+    video_path = os.path.join(output_dir, "result.mp4")
+    save_video(results, video_path, fps=fps)
+
 
 
 def main_worker():

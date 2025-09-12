@@ -83,14 +83,16 @@ def visualize(input, pred, target, epoch, save_dir='./cls/vis'):
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 opts = parser.parse_args()
 opts.batch_size = 32
-opts.sampler_size1 = 300
+opts.sampler_size1 = 0
 opts.sampler_size2 = 0
 opts.sampler_size3 = 800
-opts.epochs = 1
+opts.test_size = [200, 0, 0]
+opts.epochs = 10
 opts.model_path='./cls/cls_models/latest.pth'  
-# opts.model_path=None  
+opts.model_path=None  
 current_lr = 1e-5
 opts.num_workers = 0
+opts.shuffle = True
 
 # ------------ 主训练逻辑 ------------
 if __name__ == "__main__":
@@ -106,31 +108,50 @@ if __name__ == "__main__":
 
     # 数据集：你需要提供 train_loader 和 val_loader
     fit_datadir = '/home/gzm/gzm-RDNet1/dataset/laparoscope_gen'
-    fit_data = DSRTestDataset(datadir=fit_datadir, fns='/home/gzm/gzm-RDNet1/dataset//laparoscope_gen_index/train1.txt',size=opts.sampler_size1, enable_transforms=False,if_align=True,real=False, HW=[256,256])
+    fit_data = DSRTestDataset(datadir=fit_datadir, fns='/home/gzm/gzm-RDNet1/dataset/laparoscope_gen_index/train1.txt',size=opts.sampler_size1, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
-    tissue_gen = './data/tissue_gen'
-    tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='./data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
+    tissue_gen = '/home/gzm/gzm-MTRRVideo/data/tissue_gen'
+    tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVideo/data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
-    tissue_dir = './data/tissue_real'
-    tissue_data = DSRTestDataset(datadir=tissue_dir,fns='./data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True,if_align=True,real=False, HW=[256,256])
+    tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
+    tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True,if_align=True,real=False, HW=[256,256])
+
+    VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
+    VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
+    VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=400, enable_transforms=False, HW=[256, 256])
+
+    HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
+    HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
+    HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=12800, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
 
     # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
-    train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data])
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size, shuffle=True, num_workers = opts.num_workers, drop_last=False, pin_memory=True)
+    train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size, shuffle=opts.shuffle, num_workers = opts.num_workers, drop_last=False, pin_memory=True)
 
 
 
-    test_data_dir1 = './data/tissue_real'
-    test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='./data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=200)
+    test_data_dir1 = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
+    test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0])
 
-    test_data_dir2 = './data/hyperK_000'
-    test_data2 = TestDataset(datadir=test_data_dir2, fns='./data/hyperK_000_list.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=200)
+    test_data_dir2 = '/home/gzm/gzm-MTRRVideo/data/hyperK_000'
+    test_data2 = TestDataset(datadir=test_data_dir2, fns='/home/gzm/gzm-MTRRVideo/data/hyperK_000_list.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[1])
 
     test_data_dir3 = '/home/gzm/gzm-RDNet1/dataset/laparoscope_gen'
-    test_data3 = DSRTestDataset(datadir=test_data_dir3, fns='/home/gzm/gzm-RDNet1/dataset/laparoscope_gen_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=200)
-    test_data = ConcatDataset([test_data1, test_data2, test_data3])
+    test_data3 = DSRTestDataset(datadir=test_data_dir3, fns='/home/gzm/gzm-RDNet1/dataset/laparoscope_gen_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[2])
 
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size, shuffle=True, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
+    VOCroot1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
+    VOCjson_file1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
+    VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=0, enable_transforms=True, HW=[256, 256])
+
+    HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
+    HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
+    HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=200, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+
+    # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
+
+    test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test])
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
+
 
     best_val_loss = float('inf')
     num_epochs = opts.epochs

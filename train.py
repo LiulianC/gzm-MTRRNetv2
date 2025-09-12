@@ -154,12 +154,13 @@ max_psnr=0
 max_ssim=0
 
 
-tensorboard_writer = SummaryWriter("./logs")
+# tensorboard_writer = SummaryWriter("./logs")
 
 if __name__ == '__main__':
     set_seed(42)  # 设置随机种子 使得checkpoint和训练结果可复现
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join('./logs', current_time)
+    # log_path = os.path.join('./logs', current_time)
+    # os.makedirs(log_path, exist_ok=True)
     train_loss_path = os.path.join("./indexcsv",f"{current_time}_train_loss_logs_compare.csv")
     index_file_path = os.path.join("./indexcsv",f"{current_time}_index_compare.csv")
     os.makedirs('./indexcsv', exist_ok=True)
@@ -168,8 +169,7 @@ if __name__ == '__main__':
     channel_weights=[]
     spatial_weights=[]
     
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
+
 
     output_dir = './img_results'
     output_dir6 = os.path.join(output_dir,f'./output_test_{current_time}')
@@ -203,7 +203,7 @@ if __name__ == '__main__':
         optimizer,
         mode='min',           # 监控的 quantity 是 loss，我们希望它减小
         factor=0.5,           # 学习率乘以 0.5
-        patience=6,           # 等待 4 个 epoch 没有 improvement 后才触发 LR 衰减
+        patience=5,           # 等待 4 个 epoch 没有 improvement 后才触发 LR 衰减
         threshold=1e-4,       # 可选：认为 loss 没有显著下降的阈值
         threshold_mode='rel', # 使用相对阈值
         cooldown=0,           # 每次衰减后冷却期（可不设）
@@ -346,7 +346,7 @@ if __name__ == '__main__':
             if i % 10 == 0 & total_train_step % 1 == 0:
 
                 save_image(train_input, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_imgs.png'), nrow=4)
-                save_image(train_ipt, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_ipt.png'), nrow=4)
+                # save_image(train_ipt, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_ipt.png'), nrow=4)
                 save_image(train_label1, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_label1.png'), nrow=4)
                 save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=4)
 
@@ -358,9 +358,9 @@ if __name__ == '__main__':
                 train_fake_RList_cat = train_fake_RList
                 save_image(train_fake_RList_cat, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=4)
 
-                train_rcmaps_List = visuals['c_map']
-                train_rcmaps_List_cat = train_rcmaps_List
-                save_image(train_rcmaps_List_cat, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_Rcmaps_List.png'), nrow=4)
+                # train_rcmaps_List = visuals['c_map']
+                # train_rcmaps_List_cat = train_rcmaps_List
+                # save_image(train_rcmaps_List_cat, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_Rcmaps_List.png'), nrow=4)
 
 
 
@@ -437,7 +437,7 @@ if __name__ == '__main__':
 
                 if i % 1 == 0 & total_test_step % 1 == 0:
                     save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
-                    save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
+                    # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
                     save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
                     save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
 
@@ -450,9 +450,9 @@ if __name__ == '__main__':
                     test_fake_RList_cat = test_fake_RList
                     save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
 
-                    test_rcmaps_List = visuals_test['c_map']
-                    test_rcmaps_List_cat = test_rcmaps_List
-                    save_image(test_rcmaps_List_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_Rcmaps_List.png'), nrow=4)
+                    # test_rcmaps_List = visuals_test['c_map']
+                    # test_rcmaps_List_cat = test_rcmaps_List
+                    # save_image(test_rcmaps_List_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_Rcmaps_List.png'), nrow=4)
 
                 total_test_step += 1
                 test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
@@ -519,7 +519,7 @@ if __name__ == '__main__':
     torch.save(state, "./model_fit/model_latest.pth".format(opts.epoch))
     print("模型已保存")
 
-tensorboard_writer.close()
+# tensorboard_writer.close()
 
 
 

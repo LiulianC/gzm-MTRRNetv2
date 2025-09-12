@@ -1520,21 +1520,23 @@ class SS2Dv2:
         self.forward_core = FORWARD_TYPES.get(forward_type, None)
 
         # in proj =======================================
+        self.disable_z = False
+
         d_proj = self.d_inner if self.disable_z else (self.d_inner * 2)
         self.in_proj = Linear(self.d_model, d_proj, bias=bias, channel_first=channel_first)
         self.act = nn.SiLU()
         
         # conv =======================================
-        # if self.with_dconv:
-            # self.conv2d = nn.Conv2d(
-            #     in_channels=self.d_inner,
-            #     out_channels=self.d_inner,
-            #     groups=self.d_inner,
-            #     bias=conv_bias,
-            #     kernel_size=d_conv,
-            #     padding=(d_conv - 1) // 2,
-            #     **factory_kwargs,
-            # )
+        if self.with_dconv:
+            self.conv2d = nn.Conv2d(
+                in_channels=self.d_inner,
+                out_channels=self.d_inner,
+                groups=self.d_inner,
+                bias=conv_bias,
+                kernel_size=d_conv,
+                padding=(d_conv - 1) // 2,
+                **factory_kwargs,
+            )
             # from causal_conv1d import causal_conv1d_fn
             # self.conv1d = causal_conv1d_fn(activation='silu')
 
@@ -1579,62 +1581,89 @@ class SS2Dv2:
         self,
         x: torch.Tensor=None, 
         # ==============================
-        force_fp32=False, # True: input fp32
+        force_fp32=False, # 是否强制输入转为 float32
         # ==============================
-        ssoflex=True, # True: input 16 or 32 output 32 False: output dtype as input
+        ssoflex=True, # True: 输入 fp16/fp32 输出固定 fp32；False: 输出数据类型与输入一致
         # ==============================
-        selective_scan_backend = None,
+        selective_scan_backend = None, # 指定 selective_scan 的计算后端 不指定则默认使用cuda
         # ==============================
         # scan_mode = "cross2d",
-        scan_mode = "bidi", # token友好型编码器 仅支持bidi
-        scan_force_torch = False,
+        scan_mode = "bidi", # 扫描模式，bidi=双向扫描（token友好型编码器，仅支持此模式）
+        scan_force_torch = False, # 是否强制使用 torch 实现，而非 CUDA/其他后端
         # ==============================
         **kwargs,
     ):
         # print('selective_scan_backend is ',selective_scan_backend)
-        assert selective_scan_backend in [None, "oflex", "mamba", "torch"]
-        _scan_mode = dict(cross2d=0, unidi=1, bidi=2, cascade2d=-1).get(scan_mode, None) if isinstance(scan_mode, str) else scan_mode # for debug
-        assert isinstance(_scan_mode, int)
-        delta_softplus = True
-        channel_first = self.channel_first
-        to_fp32 = lambda *args: (_a.to(torch.float32) for _a in args)
-        force_fp32 = force_fp32 or ((not ssoflex) and self.training)
+        assert selective_scan_backend in [None, "oflex", "mamba", "torch"] # 后端合法性检查
+        _scan_mode = dict(cross2d=0, unidi=1, bidi=2, cascade2d=-1).get(scan_mode, None) if isinstance(scan_mode, str) else scan_mode 
+        # 将字符串 scan_mode 转为对应整数 id
+        assert isinstance(_scan_mode, int) # 确保 scan_mode 是 int
+        delta_softplus = True # 是否对 delta 使用 softplus 激活
+        channel_first = self.channel_first # 数据格式 (B, C, H, W) 或 (B, H, W, C)
+        to_fp32 = lambda *args: (_a.to(torch.float32) for _a in args) # 小工具函数：批量转 fp32
+        force_fp32 = force_fp32 or ((not ssoflex) and self.training) 
+        # 如果训练时 ssoflex=False，则强制使用 fp32
 
         if not channel_first:
-            x = x.permute(0, 3, 1, 2).contiguous()
+            x = x.permute(0, 3, 1, 2).contiguous() 
+            # 如果输入是 channel_last (B, H, W, C)，转为 (B, C, H, W)
 
-        B, D, H, W = x.shape
-        N = self.d_state
-        K, D, R = self.k_group, self.d_inner, self.dt_rank
-        L = H * W
+        B, D, H, W = x.shape # 批大小、通道数、高度、宽度
+        N = self.d_state  # 状态维度（SSM 隐状态维数）
+        K, D, R = self.k_group, self.d_inner, self.dt_rank 
+        # K: 分组数，D: 内部通道数，R: 时间步 rank
+        L = H * W # 展开后的序列长度
 
+        # 定义 selective_scan 调用函数
         def selective_scan(u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=True):
             return selective_scan_fn(u, delta, A, B, C, D, delta_bias, delta_softplus, ssoflex, backend=selective_scan_backend)
         
         if True:
-            xs = cross_scan_fn(x, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch)
-            x_dbl = self.x_proj(xs.view(B, -1, L))
+            # 1️⃣ 多方向扫描（cross/bi-direction）
+            xs = cross_scan_fn(x, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch) 
+            # (B, C, H, W) → (B, 4, C, L) 不同方向的扫描序列
+            
+            # 2️⃣ 把 cross_scan_fn 得到的 (B, 4, D, L) 做投影，拆分出后续 SSM（Mamba 部分）需要的参数
+            x_dbl = self.x_proj(xs.view(B, -1, L)) 
+            # (B, K*D, L) → (B, K*(R+N+N), L)
+
+            # 3️⃣ 按维度拆分
             dts, Bs, Cs = torch.split(x_dbl.view(B, K, -1, L), [R, N, N], dim=2)
-            dts = dts.contiguous().view(B, -1, L)
-            dts = self.dt_projs(dts)
+            # dts: (B, K, R, L)，Bs: (B, K, N, L)，Cs: (B, K, N, L)
 
-            xs = xs.view(B, -1, L)
-            dts = dts.contiguous().view(B, -1, L)
-            As = -self.A_logs.to(torch.float).exp() # (k * c, d_state)
-            Ds = self.Ds.to(torch.float) # (K * c)
-            Bs = Bs.contiguous().view(B, K, N, L)
-            Cs = Cs.contiguous().view(B, K, N, L)
-            delta_bias = self.dt_projs_bias.view(-1).to(torch.float)
+            # self.x_proj 先生成一个低秩的 Δt 表示 (B, K, R, L)
+            # self.dt_projs 再把它投影成和输入特征同维度的 Δt (B, K, D_inner, L)
+            dts = dts.contiguous().view(B, -1, L) # (B, K*R, L)
+            dts = self.dt_projs(dts) # 投影 dts，保持 (B, K*R, L)
 
+            # 4️⃣ xs 和 dts 调整形状
+            xs = xs.view(B, -1, L) # (B, K*D, L)
+            dts = dts.contiguous().view(B, -1, L) # (B, K*R, L)
+
+            # 5️⃣ 预计算常量参数
+            As = -self.A_logs.to(torch.float).exp() # (K*C, d_state)
+            Ds = self.Ds.to(torch.float) # (K*C)
+            Bs = Bs.contiguous().view(B, K, N, L) # (B, K, N, L)
+            Cs = Cs.contiguous().view(B, K, N, L) # (B, K, N, L)
+            delta_bias = self.dt_projs_bias.view(-1).to(torch.float) # (K*R)
+
+            # 6️⃣ 强制转 fp32（如果需要）
             if force_fp32:
                 xs, dts, Bs, Cs = to_fp32(xs, dts, Bs, Cs)
 
+            # 7️⃣ selective_scan（核心 SSM 计算）
             ys: torch.Tensor = selective_scan(
                 xs, dts, As, Bs, Cs, Ds, delta_bias, delta_softplus
-            ).view(B, K, -1, H, W)
-            
-            y: torch.Tensor = cross_merge_fn(ys, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch)
+            ).view(B, K, -1, H, W) 
+            # 输出 (B, K, D_out, H, W)
 
+            # 8️⃣ 多方向结果 merge 回原通道
+            y: torch.Tensor = cross_merge_fn(ys, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch)
+            # (B, K, D_out, H, W) → (B, D_out, H, W)
+                # y: (B, 4, C, L) | (B, L, 4, C)
+                # x: (B, C, H * W) | (B, H * W, C) | (B, 4, C, H * W) | (B, H * W, 4, C)            
+
+            # 9️⃣ Debug 信息保存
             if getattr(self, "__DEBUG__", False):
                 setattr(self, "__data__", dict(
                     A_logs=self.A_logs, Bs=Bs, Cs=Cs, Ds=Ds,
@@ -1642,39 +1671,58 @@ class SS2Dv2:
                     ys=ys, y=y, H=H, W=W,
                 ))
 
+        # 10️⃣ 调整形状，确保输出为 (B, C, H, W)
         y = y.view(B, -1, H, W)
         if not channel_first:
-            y = y.permute(0, 2, 3, 1).contiguous()
+            y = y.permute(0, 2, 3, 1).contiguous() # 转回 channel_last
+
+        # 11️⃣ 输出归一化
         y = self.out_norm(y)
 
-        return y.to(x.dtype)
+        return y.to(x.dtype) # 保持输出数据类型和输入一致
 
     def forwardv2(self, x: torch.Tensor, **kwargs):
-        x = self.in_proj(x)
-        if not self.disable_z:
-            x, z = x.chunk(2, dim=(1 if self.channel_first else -1)) # (b, h, w, d)
-            if not self.disable_z_act:
-                z = self.act(z)
-        # if not self.channel_first: # 默认channel first = False 所以这里要把BHWC变成BCHW方便卷积
-        #     x = x.permute(0, 3, 1, 2).contiguous()
-        # if self.with_dconv:
-        #     x = self.conv2d(x) # (b, d, h, w)
+        x = self.in_proj(x)  
+        # 线性投影输入 (通常是 1x1 卷积/全连接)，调整通道维度
+        
+        if not self.disable_z:  
+            x, z = x.chunk(2, dim=(1 if self.channel_first else -1))  
+            # 沿通道维度把 x 分成两半：x 用于主干，z 用于门控 (gating)
+            
+            if not self.disable_z_act:  
+                z = self.act(z)  
+                # 对 z 施加激活函数 (如 SiLU/GeLU)，增强非线性门控效果
+        
+        if not self.channel_first:  # 默认 channel_first=False
+            x = x.permute(0, 3, 1, 2).contiguous()  
+            # 把 (B, H, W, C) 转成 (B, C, H, W)，方便卷积操作
+        
+        if self.with_dconv:  
+            x = self.conv2d(x)  
+            # 可选的深度卷积 (depthwise conv)，增强空间建模能力
 
-
-        # if self.with_dconv:   # 因为版本冲突 用不了causal conv1d
-        #     # x(b, h, w, d)
-        #     b,h,w,d = x.shape
-        #     x = x.reshape(b,h*w,d).permute(0,2,1).contiguous() # (b, d, h*w)
-        #     x = self.conv1d(x) # (b, d, h*w)
-        #     x = x.permute(0,2,1).view(b,h,w,d) # (b, h, w, d)
-
-        x = self.act(x)
-        y = self.forward_core(x)
-        y = self.out_act(y)
-        if not self.disable_z:
-            y = y * z
-        out = self.dropout(self.out_proj(y))
-        return out
+        if not self.channel_first:  # 默认 channel_first=False
+            x = x.permute(0, 2, 3, 1).contiguous()  
+            # 转回去       
+        
+        x = self.act(x)  
+        # 激活函数 (如 GeLU/SiLU)
+        
+        y = self.forward_core(x)  
+        # 核心模块计算 (如 SSM/mamba block)，输出特征 y
+        
+        y = self.out_act(y)  
+        # 输出激活函数
+        
+        if not self.disable_z:  
+            y = y * z  
+            # 门控机制：用 z 作为控制信号，对 y 进行逐元素调制
+        
+        out = self.dropout(self.out_proj(y))  
+        # 线性投影输出 (如 1x1 conv/FC)，再加 Dropout
+        
+        return out  
+        # 返回最终输出
 
     @staticmethod
     def get_outnorm(forward_type="", d_inner=192, channel_first=True):
@@ -1848,10 +1896,10 @@ class VSSBlock(nn.Module):
         
         self.drop_path = DropPath(drop_path)
         
-        if self.mlp_branch:
-            self.norm2 = LayerNorm(hidden_dim, channel_first=channel_first)
-            mlp_hidden_dim = int(hidden_dim * mlp_ratio)
-            self.mlp = Mlp(in_features=hidden_dim, hidden_features=mlp_hidden_dim, act_layer=mlp_act_layer, drop=mlp_drop_rate, channel_first=channel_first)
+        # if self.mlp_branch:
+        #     self.norm2 = LayerNorm(hidden_dim, channel_first=channel_first)
+        #     mlp_hidden_dim = int(hidden_dim * mlp_ratio)
+        #     self.mlp = Mlp(in_features=hidden_dim, hidden_features=mlp_hidden_dim, act_layer=mlp_act_layer, drop=mlp_drop_rate, channel_first=channel_first)
 
     def _forward(self, input: torch.Tensor):
         x = input
@@ -1861,11 +1909,12 @@ class VSSBlock(nn.Module):
             else:
                 x = x + self.drop_path(self.op(self.norm(x)))
 
-        if self.mlp_branch:
-            if self.post_norm:
-                x = x + self.drop_path(self.norm2(self.mlp(x))) # FFN
-            else:
-                x = x + self.drop_path(self.mlp(self.norm2(x))) # FFN
+        # if self.mlp_branch:
+        #     if self.post_norm:
+        #         x = x + self.drop_path(self.norm2(self.mlp(x))) # FFN
+        #     else:
+        #         x = x + self.drop_path(self.mlp(self.norm2(x))) # FFN
+        
         return x
 
     def forward(self, input: torch.Tensor):

@@ -338,7 +338,6 @@ class VSSTokenMambaModule(nn.Module):
                 mlp_act_layer=mlp_act_layer,
                 mlp_drop_rate=mlp_drop_rate,
                 use_checkpoint=use_checkpoint,
-                # forward_type='v052d'
             ))
         
         return nn.Sequential(OrderedDict(
@@ -409,7 +408,7 @@ class TokenStage(nn.Module):
         self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) \
             if mamba_blocks > 0 else None
         if swin_blocks > 0:
-            input_resolution = (self.grid_size, self.grid_size)
+            input_resolution = (self.grid_size, self.grid_size) 
             num_heads = max(1, embed_dim // 32)
             self.swin_processor = SwinTokenBlock(
                 embed_dim, input_resolution, num_heads, window_size, swin_blocks)
@@ -516,7 +515,7 @@ class MultiScaleTokenEncoder(nn.Module):
 
 class TokenSubNet(nn.Module):
     """Token融合/细化模块：多尺度token交互融合"""
-    def __init__(self, embed_dims=[96,96,96,96], mam_blocks=[3,3,3,3]):
+    def __init__(self, embed_dims=[96,96,96,96], mam_blocks=[6,6,6,6]):
         super().__init__()
         self.embed_dims = embed_dims
         
