@@ -1520,8 +1520,8 @@ class SS2Dv2:
         self.forward_core = FORWARD_TYPES.get(forward_type, None)
 
         # in proj =======================================
-        self.disable_z = False
-
+        
+        # self.disable_z = False
         d_proj = self.d_inner if self.disable_z else (self.d_inner * 2)
         self.in_proj = Linear(self.d_model, d_proj, bias=bias, channel_first=channel_first)
         self.act = nn.SiLU()
@@ -1588,6 +1588,7 @@ class SS2Dv2:
         selective_scan_backend = None, # 指定 selective_scan 的计算后端 不指定则默认使用cuda
         # ==============================
         # scan_mode = "cross2d",
+        # scan_mode = "roate2d",
         scan_mode = "bidi", # 扫描模式，bidi=双向扫描（token友好型编码器，仅支持此模式）
         scan_force_torch = False, # 是否强制使用 torch 实现，而非 CUDA/其他后端
         # ==============================
@@ -1595,7 +1596,7 @@ class SS2Dv2:
     ):
         # print('selective_scan_backend is ',selective_scan_backend)
         assert selective_scan_backend in [None, "oflex", "mamba", "torch"] # 后端合法性检查
-        _scan_mode = dict(cross2d=0, unidi=1, bidi=2, cascade2d=-1).get(scan_mode, None) if isinstance(scan_mode, str) else scan_mode 
+        _scan_mode = dict(cross2d=0, unidi=1, bidi=2, cascade2d=-1, roate2d=3).get(scan_mode, None) if isinstance(scan_mode, str) else scan_mode 
         # 将字符串 scan_mode 转为对应整数 id
         assert isinstance(_scan_mode, int) # 确保 scan_mode 是 int
         delta_softplus = True # 是否对 delta 使用 softplus 激活
@@ -1656,12 +1657,12 @@ class SS2Dv2:
                 xs, dts, As, Bs, Cs, Ds, delta_bias, delta_softplus
             ).view(B, K, -1, H, W) 
             # 输出 (B, K, D_out, H, W)
+            # print('mamba out shape',ys.shape)  ([16, 4, 192, 64, 64])
 
             # 8️⃣ 多方向结果 merge 回原通道
             y: torch.Tensor = cross_merge_fn(ys, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch)
-            # (B, K, D_out, H, W) → (B, D_out, H, W)
-                # y: (B, 4, C, L) | (B, L, 4, C)
-                # x: (B, C, H * W) | (B, H * W, C) | (B, 4, C, H * W) | (B, H * W, 4, C)            
+            # (B, K, D_out, H, W) → (B, D_out, H* W) 
+            # print('mamba merge out shape',y.shape)  ([16, 192, 4096]) 
 
             # 9️⃣ Debug 信息保存
             if getattr(self, "__DEBUG__", False):
@@ -1709,6 +1710,7 @@ class SS2Dv2:
         # 激活函数 (如 GeLU/SiLU)
         
         y = self.forward_core(x)  
+        # print('core out shape',y.shape) ([16, 64, 64, 192]) ([16, 192, 64, 64])
         # 核心模块计算 (如 SSM/mamba block)，输出特征 y
         
         y = self.out_act(y)  

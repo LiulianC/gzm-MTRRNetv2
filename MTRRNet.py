@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from classifier import PretrainedConvNext_e2e
 import math
 import tabulate
-
+import torch.utils.checkpoint as cp
 
 # padding是边缘复制 减少边框伪影
 class Conv2DLayer(nn.Sequential):
@@ -388,7 +388,7 @@ class MTRRNet(nn.Module):
         init_all_weights(self)
         
         # RDM保持不变，用于生成rmap
-        self.rdm = RDM()
+        # self.rdm = RDM()
         
         # 多尺度Token编码器
         self.token_encoder = MultiScaleTokenEncoder(
@@ -405,6 +405,10 @@ class MTRRNet(nn.Module):
             mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
         )
         self.token_subnet2 = TokenSubNet(
+            embed_dims=[96, 96, 96, 96],         # 融合后的token维度
+            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
+        )
+        self.token_subnet3 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
         )
@@ -435,23 +439,24 @@ class MTRRNet(nn.Module):
     def _forward_token_only(self, x_in):
         """Token-only版本的前向传播"""
         
-        # 1. RDM提取反光先验（保持与原架构兼容）
-        rmap, _, _, _ = self.rdm(x_in)  # rmap: (B, 3, 256, 256)
         
         # 2. 多尺度Token编码
         tokens_list = self.token_encoder(x_in)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
         # 3. Token SubNet融合
-        # fused_tokens = self.token_subnet(tokens_list)  # (B, ref_H*ref_W, embed_dim)
         tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        fused_tokens = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        tokens_list = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        fused_tokens = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
+        # tokens_list = cp.checkpoint(lambda inp: self.token_subnet1(inp), tokens_list)
+        # tokens_list = cp.checkpoint(lambda inp: self.token_subnet2(inp), tokens_list)
+        # fused_tokens = cp.checkpoint(lambda inp: self.token_subnet3(inp), tokens_list)
 
         # 4. 统一解码：token → 6通道(T,R)
         out = self.token_decoder(fused_tokens, x_in)  # (B, 6, 256, 256)
         
-        return rmap, out
+        return out
 
 
     
@@ -466,9 +471,9 @@ class MTRREngine(nn.Module):
         self.opts  = opts
         self.visual_names = ['fake_T', 'fake_R', 'c_map', 'I', 'Ic', 'T', 'R']
         self.netG_T = MTRRNet(training=training).to(device)  
-        # self.netG_T.apply(self.init_weights)
-        self.net_c = PretrainedConvNext_e2e("convnext_small_in22k").cuda()
+
         # print(torch.load('./pretrained/cls_model.pth', map_location=str(self.device)).keys())
+        self.net_c = PretrainedConvNext_e2e("convnext_small_in22k").cuda()
         self.net_c.load_state_dict(torch.load('/home/gzm/gzm-MTRRNetv2/cls/cls_models/clsbest.pth', map_location=str(self.device)))
         self.net_c.eval()  # 预训练模型不需要训练        
 
@@ -519,15 +524,18 @@ class MTRREngine(nn.Module):
 
 
     def forward(self):
-        # self.init()
-        # 暂停net_c：直接使用原始输入self.I（不破坏接口）
+
+        
         # with torch.no_grad():
         #     self.Ic = self.net_c(self.I)
+
         self.Ic = self.I  # 直接设置为原始输入
         
         # 使用原始输入调用token-only模型
-        self.c_map, self.out = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
+        self.out = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
         self.fake_T, self.fake_R = self.out[:,0:3,:,:],self.out[:,3:6,:,:]
+
+        self.c_map = torch.zeros_like(self.I) # 不要rdm了
 
 
         

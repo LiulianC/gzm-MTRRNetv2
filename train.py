@@ -59,11 +59,11 @@ opts.draw_attention_map = False # 注册cbam钩子 画注意力热力图 训练�
 opts.sampler_size1 = 0
 opts.sampler_size2 = 0
 opts.sampler_size3 = 80
-opts.test_size = [20,0,0]
+opts.test_size = [200,0,0]
 opts.epoch = 40
 opts.training = False # 训练模式 False为测试模式
 # opts.model_path='./model_fit/model_latest.pth'  
-# opts.model_path='./done/model_200.pth'  
+# opts.model_path='./done/2subnet+conv2d-ffn/model_37.pth'  
 opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
@@ -80,7 +80,7 @@ print("Applying improved initialization...")
 if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
     opts.training = True # 训练模式 False为测试模式
     opts.epoch = 300
-    opts.batch_size = 16
+    opts.batch_size = 8
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
     opts.sampler_size3 = 800
@@ -104,11 +104,11 @@ tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/dat
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
-VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=400, enable_transforms=False, HW=[256, 256])
+VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=0, enable_transforms=False, HW=[256, 256])
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=12800, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=12800, enable_transforms=False, unaligned_transforms=True, if_align=True, HW=[256,256], flag=None)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -131,7 +131,7 @@ VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=0, enable_transforms=
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=200, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=200, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
 
 # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
