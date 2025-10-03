@@ -396,6 +396,7 @@ class TokenStage(nn.Module):
         self.grid_size = img_size // patch_size
         self.drop_branch_prob = drop_branch_prob
         self.training = training
+        # self.training = False
 
         # 旁路梯度强度（极小）：不改变前向数值，但能给被丢分支“续一点梯度”
         self.ghost_grad_coeff = 0.02
@@ -405,13 +406,15 @@ class TokenStage(nn.Module):
         self.high_embed = TokenPatchEmbed(img_size, patch_size, in_chans, embed_dim)
 
         # Mamba处理低频，Swin处理高频
-        self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) \
-            if mamba_blocks > 0 else None
+        self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) if mamba_blocks > 0 else None
+        # self.mamba_processor = nn.Identity()
+
+        
         if swin_blocks > 0:
             input_resolution = (self.grid_size, self.grid_size) 
             num_heads = max(1, embed_dim // 32)
-            self.swin_processor = SwinTokenBlock(
-                embed_dim, input_resolution, num_heads, window_size, swin_blocks)
+            self.swin_processor = SwinTokenBlock(embed_dim, input_resolution, num_heads, window_size, swin_blocks)
+            # self.swin_processor = nn.Identity()
         else:
             self.swin_processor = None
 
@@ -461,6 +464,7 @@ class TokenStage(nn.Module):
         # -------------------------
         if self.mamba_processor is not None and self.swin_processor is not None:
             fused_tokens = self.fusion([low_tokens, high_tokens])
+            # fused_tokens = low_tokens + high_tokens
         elif self.mamba_processor is not None:
             fused_tokens = low_tokens
         else:
@@ -528,6 +532,10 @@ class TokenSubNet(nn.Module):
             self.refinement_blocks.append(nn.Sequential(
                 VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]], channel_first=True),
             ))
+        # for i in range(len(embed_dims)):
+        #     self.refinement_blocks.append(nn.Sequential(
+        #         nn.Identity(),
+        #     ))
 
         alpha_init_value = 0.5  # 融合权重初始值
         channels = embed_dims
@@ -706,7 +714,8 @@ class UnifiedTokenDecoder(nn.Module):
         # Base residual: 输入图像的residual base
         base_input = x_in.repeat(1, 2, 1, 1)  # (B, 6, 256, 256) 复制为T,R base
         base = self.base_scale * base_input
-        
+        # base = 0.8 * base_input
+        # print('Base scale:', self.base_scale.item())
         # 最终输出 = base + delta
         output = base + delta
         

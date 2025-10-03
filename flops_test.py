@@ -12,11 +12,7 @@ from MTRRNet import MTRREngine
 # 2. 加载模型
 # ----------------------
 model = MTRREngine(device='cuda', training=False)
-state_dict = torch.load(
-    "./done/3subnet+conv2d-ffn+roatenscan/model_41.pth",
-    map_location="cuda"
-)
-model.netG_T.load_state_dict(state_dict['netG_T'])
+
 model.eval()
 
 # ----------------------
@@ -106,18 +102,19 @@ custom_ops = {
 # ----------------------
 # 4. 统计 Params
 # ----------------------
-num_params = sum(p.numel() for p in model.netG_T.parameters())
+num_params = sum(p.numel() for p in model.parameters())
 print(f"Total Params: {num_params/1e6:.2f} M")
 
 # ----------------------
 # 5. 统计 FLOPs
 # ----------------------
 dummy_input = torch.randn(1, 3, 256, 256).to('cuda')
-flops, params = profile(model.netG_T, inputs=(dummy_input,), custom_ops=custom_ops)
+model.I = dummy_input
+flops, params = profile(model, inputs=(dummy_input,), custom_ops=custom_ops)
 flops, params = clever_format([flops, params], "%.3f")
 
 # ----------------------
-# 6. 统计 被调用模块
+# 统计 被调用模块
 # ----------------------
 hooked_modules = []
 
@@ -125,10 +122,12 @@ def debug_hook(m, x, y):
     hooked_modules.append(m.__class__.__name__)
     return None
 
-for name, module in model.netG_T.named_modules():
+for name, module in model.named_modules():
     module.register_forward_hook(debug_hook)
 
-_ = model.netG_T(dummy_input)
+
+model.forward()
+
 
 print("Forward 中被调用的模块类型:")
 print(set(hooked_modules))

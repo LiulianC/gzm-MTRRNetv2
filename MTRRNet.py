@@ -394,6 +394,7 @@ class MTRRNet(nn.Module):
         self.token_encoder = MultiScaleTokenEncoder(
             embed_dims=[96, 96, 96, 96],    # 对应原encoder0~3的embed_dim  
             mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
+            # mamba_blocksl=[5, 5, 5, 5],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
             drop_branch_prob=0.2,
             training=self.training                      # 启用训练模式以支持随机失活
@@ -403,15 +404,17 @@ class MTRRNet(nn.Module):
         self.token_subnet1 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
+            # mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
         )
         self.token_subnet2 = TokenSubNet(
             embed_dims=[96, 96, 96, 96],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
+            # mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
         )
-        self.token_subnet3 = TokenSubNet(
-            embed_dims=[96, 96, 96, 96],         # 融合后的token维度
-            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
-        )
+        # self.token_subnet3 = TokenSubNet(
+        #     embed_dims=[96, 96, 96, 96],         # 融合后的token维度
+        #     mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
+        # )
 
         # 统一Token解码器
         self.token_decoder = UnifiedTokenDecoder(
@@ -445,13 +448,15 @@ class MTRRNet(nn.Module):
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
         # 3. Token SubNet融合
-        tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        tokens_list = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        fused_tokens = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        # fused_tokens = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
-        # tokens_list = cp.checkpoint(lambda inp: self.token_subnet1(inp), tokens_list)
-        # tokens_list = cp.checkpoint(lambda inp: self.token_subnet2(inp), tokens_list)
-        # fused_tokens = cp.checkpoint(lambda inp: self.token_subnet3(inp), tokens_list)
+        tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        fused_tokens = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+
+        # tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        # tokens_list = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        # fused_tokens = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+
 
         # 4. 统一解码：token → 6通道(T,R)
         out = self.token_decoder(fused_tokens, x_in)  # (B, 6, 256, 256)
@@ -465,7 +470,7 @@ class MTRRNet(nn.Module):
 
 class MTRREngine(nn.Module):
  
-    def __init__(self, opts, device, training=True):
+    def __init__(self, opts=None, device='cuda', training=True):
         super(MTRREngine, self).__init__()
         self.device = device 
         self.opts  = opts
@@ -474,8 +479,8 @@ class MTRREngine(nn.Module):
 
         # print(torch.load('./pretrained/cls_model.pth', map_location=str(self.device)).keys())
         self.net_c = PretrainedConvNext_e2e("convnext_small_in22k").cuda()
-        self.net_c.load_state_dict(torch.load('/home/gzm/gzm-MTRRNetv2/cls/cls_models/clsbest.pth', map_location=str(self.device)))
-        self.net_c.eval()  # 预训练模型不需要训练        
+        
+        # self.net_c.eval()  # 预训练模型不需要训练        
 
 
 
@@ -485,7 +490,7 @@ class MTRREngine(nn.Module):
             print('Load the model from %s' % model_path)
             model_state = torch.load(model_path, map_location=str(self.device))
             
-            self.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()})
+            self.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()},strict=False)
 
             if 'optimizer_state_dict' in model_state:
                 try:
@@ -499,6 +504,15 @@ class MTRREngine(nn.Module):
                     if 'lr' in model_state:
                         for param_group in optimizer.param_groups:
                             param_group['lr'] = model_state['lr']
+
+            if 'net_c' in model_state:
+                try:
+                    self.net_c.load_state_dict(model_state['net_c'])
+                except ValueError as e:
+                    print(f"Warning: Could not load net_c state due to: {e}")
+                    print("Continuing with existing net_c state")
+            else:
+                self.net_c.load_state_dict(torch.load('/home/gzm/gzm-MTRRNetv2/cls/cls_models/clsbest.pth', map_location=str(self.device)))
 
             epoch = model_state.get('epoch', None)
             print('Loaded model at epoch %d' % (epoch+1) if epoch is not None else 'Loaded model without epoch info')
@@ -523,13 +537,15 @@ class MTRREngine(nn.Module):
         
 
 
-    def forward(self):
+    def forward(self,input=None):# 这个input参数是为了匹配测flops函数接口
 
         
         # with torch.no_grad():
         #     self.Ic = self.net_c(self.I)
 
-        self.Ic = self.I  # 直接设置为原始输入
+        self.Ic = self.net_c(self.I)
+
+        # self.Ic = self.I  # 直接设置为原始输入
         
         # 使用原始输入调用token-only模型
         self.out = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic

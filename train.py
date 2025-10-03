@@ -19,6 +19,7 @@ from dataset.new_dataset1 import *
 from torch import amp
 scaler = amp.GradScaler()
 from set_seed import set_seed 
+from torchvision.utils import make_grid
 
 
 warnings.filterwarnings('ignore')
@@ -62,12 +63,13 @@ opts.sampler_size3 = 80
 opts.test_size = [200,0,0]
 opts.epoch = 40
 opts.training = False # 训练模式 False为测试模式
-# opts.model_path='./model_fit/model_latest.pth'  
-# opts.model_path='./done/2subnet+conv2d-ffn/model_37.pth'  
-opts.model_path=None  #如果要load就注释我
+opts.model_path='./model_fit/model_latest.pth'  
+# opts.model_path='./model_fit/model_125.pth'  
+# opts.model_path='/home/gzm/gzm-MTRRNetv2/done-blocks/2subnet+conv2d-ffn+roaten scan/model_latest.pth'  
+# opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
-
+ 
 
 # nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train.log 2>&1 &
 
@@ -84,7 +86,9 @@ if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
     opts.sampler_size3 = 800
-    opts.test_size = [200,0,0]
+    opts.sampler_size4 = 0
+    opts.sampler_size5 = 1200
+    opts.test_size = [200,0,0,0,200]
     if opts.debug_monitor_layer_stats:
         os.remove('./debug/state.log') if os.path.exists('./debug/state.log') else None
         model.monitor_layer_stats()# 注册
@@ -104,11 +108,11 @@ tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/dat
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
-VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=0, enable_transforms=False, HW=[256, 256])
+VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=opts.sampler_size4, enable_transforms=False, HW=[256, 256])
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=12800, enable_transforms=False, unaligned_transforms=True, if_align=True, HW=[256,256], flag=None)
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=False, unaligned_transforms=True, if_align=True, HW=[256,256], flag=None, SamplerSize=True)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -127,16 +131,20 @@ test_data3 = DSRTestDataset(datadir=test_data_dir3, fns='/home/gzm/gzm-RDNet1/da
 
 VOCroot1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file1 = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
-VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=0, enable_transforms=True, HW=[256, 256])
+VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=opts.test_size[3], enable_transforms=True, HW=[256, 256])
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=200, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None)
+HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=372, size=opts.test_size[4], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False)
+
+HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
+HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
+HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=370, end=372, size=200, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False)
 
 # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
-test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test])
-test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
+test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test, HyperK_data_test2])
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=4, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
 
 
 
@@ -435,24 +443,36 @@ if __name__ == '__main__':
                     writer.writerow(row)
 
 
-                if i % 1 == 0 & total_test_step % 1 == 0:
-                    save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
-                    # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
-                    save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
-                    save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
+                if i % 5 == 0 & total_test_step % 1 == 0:
+                    # save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
+                    # # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
+                    # save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
+                    # save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
 
-                    test_fake_TList = visuals_test['fake_T']
-                    test_fake_TList_cat = test_fake_TList
-                    save_image(test_fake_TList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_fakeT.png'), nrow=4)
-                    # torch.save(test_fake_TList_cat,os.path.join(output_dir6,f'epoch{i}+{total_test_step}+fakeT-tensor.pt'))
+                    # test_fake_TList = visuals_test['fake_T']
+                    # test_fake_TList_cat = test_fake_TList
+                    # save_image(test_fake_TList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_fakeT.png'), nrow=4)
+                    # # torch.save(test_fake_TList_cat,os.path.join(output_dir6,f'epoch{i}+{total_test_step}+fakeT-tensor.pt'))
 
-                    test_fake_RList = visuals_test['fake_R']
-                    test_fake_RList_cat = test_fake_RList
-                    save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
+                    # test_fake_RList = visuals_test['fake_R']
+                    # test_fake_RList_cat = test_fake_RList
+                    # save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
 
-                    # test_rcmaps_List = visuals_test['c_map']
-                    # test_rcmaps_List_cat = test_rcmaps_List
-                    # save_image(test_rcmaps_List_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_Rcmaps_List.png'), nrow=4)
+                    B = test_imgs.size(0)
+
+                    # 每行各自拼 batch
+                    grid_in  = make_grid(test_imgs, nrow=B, padding=2)
+                    grid_out = make_grid(test_fake_Ts, nrow=B, padding=2)
+                    grid_tgt = make_grid(test_label1, nrow=B, padding=2)
+
+                    # 高度方向拼接成三行
+                    grid_all = torch.cat([grid_in, grid_out, grid_tgt], dim=1)  # dim=1 是 H 维度
+
+                    # 调用你已有的 save_image 保存
+                    save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-grid.png'))
+
+
+
 
                 total_test_step += 1
                 test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})

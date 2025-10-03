@@ -1521,7 +1521,7 @@ class SS2Dv2:
 
         # in proj =======================================
         
-        # self.disable_z = False
+        # self.disable_z = True
         d_proj = self.d_inner if self.disable_z else (self.d_inner * 2)
         self.in_proj = Linear(self.d_model, d_proj, bias=bias, channel_first=channel_first)
         self.act = nn.SiLU()
@@ -1537,8 +1537,7 @@ class SS2Dv2:
                 padding=(d_conv - 1) // 2,
                 **factory_kwargs,
             )
-            # from causal_conv1d import causal_conv1d_fn
-            # self.conv1d = causal_conv1d_fn(activation='silu')
+
 
         # x proj ============================
         self.x_proj = Linear(self.d_inner, self.k_group * (self.dt_rank + self.d_state * 2), groups=self.k_group, bias=False, channel_first=True)

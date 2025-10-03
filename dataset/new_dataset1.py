@@ -622,7 +622,7 @@ class VOCJsonDataset(Dataset):
 class HyperKDataset(Dataset):
     def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
                  enable_transforms=False, unaligned_transforms=False,
-                 if_align=True, HW=[256,256], flag=None):
+                 if_align=True, HW=[256,256], flag=None, SamplerSize=False):
         super(HyperKDataset, self).__init__()
         self.root = root
         self.start = start
@@ -673,10 +673,15 @@ class HyperKDataset(Dataset):
         # 随机抽样
         if size == 0:
             self.I_paths, self.T_paths = [], []
-        elif size is not None and size <= len(self.I_paths):
+        elif size is not None and size <= len(self.I_paths) and SamplerSize:
+            # 如果需要随机抽样
             zipped = list(zip(self.I_paths, self.T_paths))
             sampled = random.sample(zipped, size)
             self.I_paths, self.T_paths = zip(*sampled)
+        elif size is not None and size > 0 and size <= len(self.I_paths):
+            # 不随机抽样，直接取前size个
+            self.I_paths = self.I_paths[:size]
+            self.T_paths = self.T_paths[:size]
 
     def align(self, x1, x2, x3):
         h, w = self.HW
