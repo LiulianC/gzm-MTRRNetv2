@@ -371,10 +371,9 @@ class SwinTokenBlock(nn.Module):
     def forward(self, x):
         # x: (B, N, C) 需要reshape为(B, H, W, C)用于Swin
         B, N, C = x.shape
-        H, W = self.input_resolution
         
         # 转换为Swin格式
-        x = x.view(B, H, W, C).contiguous()
+        x = x.view(B, int(N**0.5), int(N**0.5), C).contiguous()
         
         for block in self.blocks:
             residual = x
@@ -387,23 +386,24 @@ class SwinTokenBlock(nn.Module):
 
 
 
-class TokenStage(nn.Module):
+class EncoderUnit(nn.Module):
     """单个尺度的Token处理阶段：频带分离→分别编码→融合（支持随机失活分支）"""
-    def __init__(self, img_size, patch_size, in_chans, embed_dim, mamba_blocks=2, swin_blocks=2, window_size=8, drop_branch_prob=0.1, training=True):
+    def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, training=True, need_downsample=False):
         super().__init__()
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.grid_size = img_size // patch_size
+        self.img_size = ori_img_size
+        self.grid_size = grid_size
         self.drop_branch_prob = drop_branch_prob
         self.training = training
+        self.need_downsample = need_downsample
         # self.training = False
 
         # 旁路梯度强度（极小）：不改变前向数值，但能给被丢分支“续一点梯度”
         self.ghost_grad_coeff = 0.02
 
         # 低频和高频的patch embedding
-        self.low_embed = TokenPatchEmbed(img_size, patch_size, in_chans, embed_dim)
-        self.high_embed = TokenPatchEmbed(img_size, patch_size, in_chans, embed_dim)
+        if need_downsample is True:
+            # 输入的是embed_dim//2 后续操作都要embed_dim
+            self.downSample = nn.Conv2d(embed_dim//2, embed_dim, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
 
         # Mamba处理低频，Swin处理高频
         self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) if mamba_blocks > 0 else None
@@ -423,18 +423,25 @@ class TokenStage(nn.Module):
             self.fusion = AAF(embed_dim, 2)
 
     def forward(self, x):
-        # 转换为tokens
-        low_tokens = self.low_embed(x)    # (B, N, C)
-        high_tokens = self.high_embed(x)  # (B, N, C)
+        # x: (B, N, C)
+        if self.need_downsample is True:
+            B, N, C = x.shape
+            x = x.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))
+            x = self.downSample(x)  # (B, 2C, H/2, W/2)
+            B, C, H, W = x.shape
+            x = x.permute(0,2,3,1).contiguous().view(B, H*W, C)
+        low_tokens = x.contiguous()  # (B, N, C)
+        high_tokens = x.contiguous() # (B, N, C)
+        B,N,C = x.shape
 
         # 分别处理
         if self.mamba_processor is not None:
-            B, N, C = low_tokens.shape
             low_tokens = low_tokens.view(B, int(N**0.5), int(N**0.5), C).contiguous()
             low_tokens = self.mamba_processor(low_tokens)
             low_tokens = low_tokens.view(B, N, C).contiguous()
         else:
             low_tokens = torch.zeros_like(low_tokens)
+
         if self.swin_processor is not None:
             high_tokens = self.swin_processor(high_tokens)
         else:
@@ -473,58 +480,87 @@ class TokenStage(nn.Module):
         return fused_tokens
 
 
-class MultiScaleTokenEncoder(nn.Module):
+
+
+
+
+class Encoder(nn.Module):
     """多尺度Token编码器：处理4个尺度得到token表示"""
-    def __init__(self, embed_dims=[96, 96, 96, 96], 
-                 mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2],drop_branch_prob=0.2,training=True):
+    def __init__(self, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2, training=True):
         super().__init__()
-        self.scales = [256, 128, 64, 32]  # 对应encoder0~3的分辨率
-        self.patch_sizes = [4, 4, 4, 2]  # 每个尺度的patch size
         
-        self.stages = nn.ModuleList()
-        for i, (scale, patch_size, embed_dim, mb, sb) in enumerate(
-            zip(self.scales, self.patch_sizes, embed_dims, mamba_blocks, swin_blocks)):
-            
-            stage = TokenStage(
-                img_size=scale,
-                patch_size=patch_size,
-                in_chans=3,
-                embed_dim=embed_dim,
-                mamba_blocks=mb,
-                swin_blocks=sb,
-                window_size=8,
-                drop_branch_prob=drop_branch_prob,
-                training=training
-            )
-            self.stages.append(stage)
+        self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=3, embed_dim=96)
+
+        self.encoder_unit0 = EncoderUnit(embed_dim=96, grid_size=64, ori_img_size=256, mamba_blocks=mamba_blocks[0], swin_blocks=swin_blocks[0], 
+                                    window_size=8, drop_branch_prob=drop_branch_prob, training=training, need_downsample=False)
+        
+        self.encoder_unit1 = EncoderUnit(embed_dim=192, grid_size=32, ori_img_size=256, mamba_blocks=mamba_blocks[1], swin_blocks=swin_blocks[1], 
+                                    window_size=8, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
+  
+        self.encoder_unit2 = EncoderUnit(embed_dim=384, grid_size=16, ori_img_size=256, mamba_blocks=mamba_blocks[2], swin_blocks=swin_blocks[2], 
+                                    window_size=4, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
+        
+        self.encoder_unit3 = EncoderUnit(embed_dim=768, grid_size=8, ori_img_size=256, mamba_blocks=mamba_blocks[3], swin_blocks=swin_blocks[3], 
+                                    window_size=4, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
     
     def forward(self, x_in):
         # x_in: (B, 3, 256, 256)
         tokens_list = []
         
-        for i, stage in enumerate(self.stages):
-            # 下采样到对应尺度
-            scale = self.scales[i]
-            if scale != 256:
-                x_scale = F.interpolate(x_in, size=(scale, scale), mode='bilinear', align_corners=False)
-            else:
-                x_scale = x_in
-            
-            # 获得该尺度的token表示
-            tokens = stage(x_scale)
-            tokens_list.append(tokens)
+        x_emb = self.patchembed(x_in)  # (B, N, C)  N=4096 C=96
+        tokens_list.append(x_emb)
+        
+        tokens = self.encoder_unit0(x_emb)  # (B, N, C)  N=64*64 C=96
+        tokens_list.append(tokens)
+
+        tokens = self.encoder_unit1(tokens)  # (B, N, C)  N=32*32 C=192
+        tokens_list.append(tokens)
+
+        tokens = self.encoder_unit2(tokens)  # (B, N, C)  N=16*16 C=384
+        tokens_list.append(tokens)
+
+        tokens = self.encoder_unit3(tokens)  # (B, N, C)  N=8*8 C=768
+        tokens_list.append(tokens)
             
         return tokens_list
 
+class Interpolate(nn.Module):
+    def __init__(self, scale_factor=2, mode='bilinear', align_corners=False):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.mode = mode
+        self.align_corners = align_corners
 
-class TokenSubNet(nn.Module):
+    def forward(self, x):
+        return F.interpolate(
+            x, 
+            scale_factor=self.scale_factor, 
+            mode=self.mode, 
+            align_corners=self.align_corners
+        )
+
+class SubNet(nn.Module):
     """Token融合/细化模块：多尺度token交互融合"""
-    def __init__(self, embed_dims=[96,96,96,96], mam_blocks=[6,6,6,6]):
+    def __init__(self, embed_dims=[96,192,384,768], mam_blocks=[6,6,6,6]):
         super().__init__()
         self.embed_dims = embed_dims
         
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.upsample1 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=1, stride=1)
+        )
+        self.upsample2 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[2], embed_dims[2]//2, kernel_size=1, stride=1)
+        )
+        self.upsample3 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=1, stride=1)
+        )
+        
+        self.downsample0 = nn.Conv2d(embed_dims[0], embed_dims[0]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
+        self.downsample1 = nn.Conv2d(embed_dims[1], embed_dims[1]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
+        self.downsample2 = nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
         
         # 融合后的细化处理
         self.refinement_blocks = nn.ModuleList()
@@ -549,16 +585,16 @@ class TokenSubNet(nn.Module):
                                    requires_grad=True) if alpha_init_value > 0 else None            
     
     def forward(self, tokens_list):
-        # tokens_list: [t0, t1, t2, t3] 每个是 (B, N_i, C_i)
-        tokens_spatial = []
+        # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i)
+
         if tokens_list[0].ndim == 3:  # 3维张量
             for i, tokens in enumerate(tokens_list):
                 B, N, C = tokens.shape
                 H = W = int(math.sqrt(N))
-                tokens_spatial.append(tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous())
+                tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
                 # (B C H W)
         else:
-            tokens_spatial = tokens_list
+            tokens_list = tokens_list
             pass  # 已经是(B C H W)格式
         
         # 融合
@@ -567,16 +603,16 @@ class TokenSubNet(nn.Module):
         self._clamp_abs(self.alpha1.data, 1e-3)
         self._clamp_abs(self.alpha0.data, 1e-3) 
 
-        f0,f1,f2,f3 = tokens_spatial[0],tokens_spatial[1],tokens_spatial[2],tokens_spatial[3]  
+        x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
         
-        # # (64 64) (32 32) (16 16) (16 16)
         # print('Token shapes in TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
+        # # (64 64) (64 64) (32 32) (16 16) (8 8)
 
-        f0 = f0*self.alpha0 + self.refinement_blocks[0](self.upsample(f1))  
-        f1 = f1*self.alpha1 + self.refinement_blocks[1](self.upsample(f2)+self.downsample(f0))  
-        f2 = f2*self.alpha2 + self.refinement_blocks[2]((f3)+self.downsample(f1))  
-        f3 = f3*self.alpha3 + self.refinement_blocks[3]((f2))  # f3最浅 f0最深 
-        tokens_spatial_list = [f0,f1,f2,f3]
+        f0 = f0*self.alpha0 + self.refinement_blocks[0](self.upsample1(f1)+x_emb)  
+        f1 = f1*self.alpha1 + self.refinement_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
+        f2 = f2*self.alpha2 + self.refinement_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
+        f3 = f3*self.alpha3 + self.refinement_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
+        tokens_spatial_list = [x_emb,f0,f1,f2,f3]
 
         # print('Token shapes out TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
 
@@ -637,39 +673,47 @@ class ConvNextBlock(nn.Module):
 
 class UnifiedTokenDecoder(nn.Module):
     """统一Token解码器：从token一次性解码为6通道(T,R)"""
-    def __init__(self, token_dim=96, base_scale_init=0.3):
+    def __init__(self, embed_dims=[96,192,384,768], base_scale_init=0.3):
         super().__init__()
-        self.token_dim = token_dim
         
-        self.proj23 = nn.Sequential(
-            nn.Conv2d(96,96,1,1),
-            nn.InstanceNorm2d(96),
-        )
-        self.convblock23 = nn.Sequential(
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            )
-        
-        self.proj12 = nn.Sequential(
-            nn.Conv2d(96,96,1,1),
-            nn.InstanceNorm2d(96),
-        )
-        self.convblock12 = nn.Sequential(
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            )
-
-        self.proj01 = nn.Sequential(
-            nn.Conv2d(96,96,1,1),
-            nn.InstanceNorm2d(96),
+        self.upsample1 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=1, stride=1),
+            nn.Conv2d(embed_dims[1]//2,embed_dims[1]//2,1,1),
+            nn.InstanceNorm2d(embed_dims[1]//2),            
         )
         self.convblock01 = nn.Sequential(
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(96, 192, 96, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            )        
+
+
+        self.upsample2 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[2], embed_dims[2]//2, kernel_size=1, stride=1),
+            nn.Conv2d(embed_dims[2]//2,embed_dims[2]//2,1,1),
+            nn.InstanceNorm2d(embed_dims[2]//2),
+        )
+        self.convblock12 = nn.Sequential(
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
             )
+        
+
+        self.upsample3 = nn.Sequential(
+            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=1, stride=1),
+            nn.Conv2d(embed_dims[3]//2,embed_dims[3]//2,1,1),
+            nn.InstanceNorm2d(embed_dims[3]//2),            
+        )
+        self.convblock23 = nn.Sequential(
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            )
+        
 
         # Base缩放因子
         self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
@@ -695,27 +739,22 @@ class UnifiedTokenDecoder(nn.Module):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
         
-        f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
+        f0,f1,f2,f3 = tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
 
-        # print('Token shapes in TokenDecoder:', f0.shape, f1.shape, f2.shape, f3.shape)
-         
-        # f3 = F.interpolate(f3, size=f2.shape[2:], mode='bilinear', align_corners=False)
-        o23 = self.convblock23(self.proj23(f2 + f3))
+        o2 = self.convblock23((f2 + self.upsample3(f3)))
 
-        o23 = F.interpolate(o23, size=f1.shape[2:], mode='bilinear', align_corners=False)
-        o12 = self.convblock12(self.proj12(f1 + o23))
+        o1 = self.convblock12((f1 + self.upsample2(o2)))
 
-        o12 = F.interpolate(o12, size=f0.shape[2:], mode='bilinear', align_corners=False)
-        o01 = self.convblock01(self.proj01(f0 + o12))
+        o0 = self.convblock01((f0 + self.upsample1(o1)))
 
         # 解码
-        delta = self.decoder(o01)  # (B, 6, 256, 256)
+        delta = self.decoder(o0)  # (B, 6, 256, 256)
         
         # Base residual: 输入图像的residual base
         base_input = x_in.repeat(1, 2, 1, 1)  # (B, 6, 256, 256) 复制为T,R base
         base = self.base_scale * base_input
         # base = 0.8 * base_input
-        # print('Base scale:', self.base_scale.item())
+
         # 最终输出 = base + delta
         output = base + delta
         

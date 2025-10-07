@@ -20,6 +20,7 @@ from torch import amp
 scaler = amp.GradScaler()
 from set_seed import set_seed 
 from torchvision.utils import make_grid
+from util.csv import write_csv_row, _to_float
 
 
 warnings.filterwarnings('ignore')
@@ -63,10 +64,8 @@ opts.sampler_size3 = 80
 opts.test_size = [200,0,0]
 opts.epoch = 40
 opts.training = False # 训练模式 False为测试模式
-opts.model_path='./model_fit/model_latest.pth'  
-# opts.model_path='./model_fit/model_125.pth'  
-# opts.model_path='/home/gzm/gzm-MTRRNetv2/done-blocks/2subnet+conv2d-ffn+roaten scan/model_latest.pth'  
-# opts.model_path=None  #如果要load就注释我
+# opts.model_path='./model_fit/model_latest.pth'  
+opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
  
@@ -85,10 +84,10 @@ if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
     opts.batch_size = 8
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
-    opts.sampler_size3 = 800
+    opts.sampler_size3 = 8
     opts.sampler_size4 = 0
-    opts.sampler_size5 = 1200
-    opts.test_size = [200,0,0,0,200]
+    opts.sampler_size5 = 12
+    opts.test_size = [2,0,0,0,2,0]
     if opts.debug_monitor_layer_stats:
         os.remove('./debug/state.log') if os.path.exists('./debug/state.log') else None
         model.monitor_layer_stats()# 注册
@@ -139,7 +138,7 @@ HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=370, end=372, size=200, enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False)
+HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=371, end=372, size=opts.test_size[5], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False)
 
 # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
@@ -169,8 +168,8 @@ if __name__ == '__main__':
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     # log_path = os.path.join('./logs', current_time)
     # os.makedirs(log_path, exist_ok=True)
-    train_loss_path = os.path.join("./indexcsv",f"{current_time}_train_loss_logs_compare.csv")
-    index_file_path = os.path.join("./indexcsv",f"{current_time}_index_compare.csv")
+    train_loss_path = os.path.join("./indexcsv",f"{current_time}_train_loss.csv")
+    index_file_path = os.path.join("./indexcsv",f"{current_time}_index.csv")
     os.makedirs('./indexcsv', exist_ok=True)
     os.makedirs('./model_fit', exist_ok=True)
 
@@ -273,7 +272,9 @@ if __name__ == '__main__':
         if opts.enable_finetune:
             model.progressive_unfreeze(i, opts)        
 
-
+        # 累计器
+        epoch_loss_sum = {}     # 每个loss的总和
+        epoch_step_count = 0
 
         for t, data1 in enumerate(train_pbar):
             # print('\n')
@@ -316,18 +317,23 @@ if __name__ == '__main__':
             if torch.isnan(all_loss):
                 print("⚠️  Loss is NaN! input:", train_file_name)
 
-            # Log loss_table to a CSV file
-            file_exists = os.path.isfile(train_loss_path)
-            # Write header if file does not exist
-            with open(train_loss_path, "a", newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=["step"] + list(loss_table.keys()))
-                if not file_exists:
-                    writer.writeheader()
-                row = {"step": total_train_step}
-                # Convert all tensor values to float
-                for k, v in loss_table.items():
-                    row[k] = v.item() if hasattr(v, "item") else float(v)
-                writer.writerow(row)
+            # # Log loss_table to a CSV file
+            # file_exists = os.path.isfile(train_loss_path)
+            # # Write header if file does not exist
+            # with open(train_loss_path, "a", newline='') as f:
+            #     writer = csv.DictWriter(f, fieldnames=["step"] + list(loss_table.keys()))
+            #     if not file_exists:
+            #         writer.writeheader()
+            #     row = {"step": total_train_step}
+            #     # Convert all tensor values to float
+            #     for k, v in loss_table.items():
+            #         row[k] = v.item() if hasattr(v, "item") else float(v)
+            #     writer.writerow(row)
+
+            for k, v in loss_table.items():
+                v_val = _to_float(v)
+                epoch_loss_sum[k] = epoch_loss_sum.get(k, 0.0) + v_val
+            epoch_step_count += 1
 
 
 
@@ -385,6 +391,16 @@ if __name__ == '__main__':
         train_pbar.close()
 
 
+        # 一轮结束：计算平均
+        epoch_loss_avg = {k: (v / max(1, epoch_step_count)) for k, v in epoch_loss_sum.items()} 
+
+        # 写CSV（每轮一次）
+        file_exists = os.path.isfile(train_loss_path)        
+        train_fields = ["epoch", "num_steps"] + list(epoch_loss_avg.keys())
+        train_row = {"epoch": i + 1, "num_steps": epoch_step_count, **epoch_loss_avg}
+        write_csv_row(train_loss_path, train_fields, train_row)               
+
+
         total_test_loss = 0
         total_test_step = 0
         total_test_psnr = 0
@@ -399,7 +415,15 @@ if __name__ == '__main__':
                 ncols=150,  # 建议宽度根据指标数量调整
                 dynamic_ncols=False,
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
-            )                  
+            )          
+
+            # 指标累计器（加权到样本级）
+            sum_psnr = 0.0
+            sum_ssim = 0.0
+            sum_lmse = 0.0
+            sum_ncc  = 0.0
+            sample_cnt = 0    
+
             for n1 , test_data1 in enumerate(test_pbar):
                 model.set_input(test_data1)
                 model.inference()
@@ -429,19 +453,38 @@ if __name__ == '__main__':
                 
                 # 检查文件是否存在，不存在则写入表头
                 file_exists1 = os.path.isfile(index_file_path)
-                with open(index_file_path, "a", newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=["epoch"] + list(res.keys()))
-                    if not file_exists1:
-                        writer.writeheader()
-                    row = {"epoch": i}
-                    # Convert all tensor values to float
-                    for k, v in res.items():
-                        if type(v) == str:
-                            row[k] = v
-                        else:
-                            row[k] = v.item() if hasattr(v, "item")  else float(v)
-                    writer.writerow(row)
 
+                # with open(index_file_path, "a", newline='') as f:
+                #     writer = csv.DictWriter(f, fieldnames=["epoch"] + list(res.keys()))
+                #     if not file_exists1:
+                #         writer.writeheader()
+                #     row = {"epoch": i}
+                #     # Convert all tensor values to float
+                #     for k, v in res.items():
+                #         if type(v) == str:
+                #             row[k] = v
+                #         else:
+                #             row[k] = v.item() if hasattr(v, "item")  else float(v)
+                #     writer.writerow(row)
+
+                file_name = test_data1['fn']          # 可能是字符串或列表
+                psnr = _to_float(index['PSNR'])
+                ssim = _to_float(index['SSIM'])
+                lmse = _to_float(index['LMSE'])
+                ncc  = _to_float(index['NCC'])
+
+                # 统计该 batch 对应的样本数
+                try:
+                    batch_n = len(file_name)          # 列表时
+                except TypeError:
+                    batch_n = 1                       # 字符串/标量时
+
+                # 累计（按样本数加权）
+                sum_psnr += psnr * batch_n
+                sum_ssim += ssim * batch_n
+                sum_lmse += lmse * batch_n
+                sum_ncc  += ncc  * batch_n
+                sample_cnt += batch_n
 
                 if i % 5 == 0 & total_test_step % 1 == 0:
                     # save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
@@ -478,6 +521,16 @@ if __name__ == '__main__':
                 test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
                 test_pbar.update(1)
 
+            # 计算验证集“样本平均”指标
+            avg_psnr = sum_psnr / max(1, sample_cnt)
+            avg_ssim = sum_ssim / max(1, sample_cnt)
+            avg_lmse = sum_lmse / max(1, sample_cnt)
+            avg_ncc  = sum_ncc  / max(1, sample_cnt)
+            # 写CSV（每轮一次）
+            val_fields = ["epoch", "num_samples", "PSNR", "SSIM", "LMSE", "NCC"]
+            val_row    = {"epoch": i + 1, "num_samples": sample_cnt,
+                        "PSNR": avg_psnr, "SSIM": avg_ssim, "LMSE": avg_lmse, "NCC": avg_ncc}
+            write_csv_row(index_file_path, val_fields, val_row)
 
             # 更新学习率
             scheduler.step(total_test_loss)
@@ -503,15 +556,23 @@ if __name__ == '__main__':
         
         
 
+        if model.net_c is not None:
+            state = {
+                'epoch': i, 
+                'net_c': model.net_c.state_dict(),
+                'netG_T': model.netG_T.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr': current_lr,
+            }
+        else:
+            state = {
+                'epoch': i, 
+                'netG_T': model.netG_T.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'lr': current_lr,
+            }
 
-        state = {
-            'epoch': i, 
-            'net_c': model.net_c.state_dict(),
-            'netG_T': model.netG_T.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'lr': current_lr,
-        }
-
+            
         # 早停检查
         early_stopping(avg_test_loss)
         if early_stopping.early_stop:

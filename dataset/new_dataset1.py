@@ -679,9 +679,11 @@ class HyperKDataset(Dataset):
             sampled = random.sample(zipped, size)
             self.I_paths, self.T_paths = zip(*sampled)
         elif size is not None and size > 0 and size <= len(self.I_paths):
-            # 不随机抽样，直接取前size个
-            self.I_paths = self.I_paths[:size]
-            self.T_paths = self.T_paths[:size]
+            # 在0~最大长度范围内平均采样size个样本
+            total_length = len(self.I_paths)
+            indices = np.linspace(0, total_length - 1, size, dtype=int)
+            self.I_paths = [self.I_paths[i] for i in indices]
+            self.T_paths = [self.T_paths[i] for i in indices]
 
     def align(self, x1, x2, x3):
         h, w = self.HW
