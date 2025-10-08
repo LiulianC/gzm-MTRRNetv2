@@ -388,14 +388,14 @@ class SwinTokenBlock(nn.Module):
 
 class EncoderUnit(nn.Module):
     """单个尺度的Token处理阶段：频带分离→分别编码→融合（支持随机失活分支）"""
-    def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, training=True, need_downsample=False):
+    def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, need_downsample=False):
         super().__init__()
         self.img_size = ori_img_size
         self.grid_size = grid_size
         self.drop_branch_prob = drop_branch_prob
-        self.training = training
+        # self.training = training # self.training是nn.Module自带的属性 不应该自己赋值 它会在train()/eval()时自动切换
         self.need_downsample = need_downsample
-        # self.training = False
+
 
         # 旁路梯度强度（极小）：不改变前向数值，但能给被丢分支“续一点梯度”
         self.ghost_grad_coeff = 0.02
@@ -450,7 +450,7 @@ class EncoderUnit(nn.Module):
         # -------------------------
         # 随机失活分支 (期望不变 + 旁路梯度)
         # -------------------------
-        if self.training and self.mamba_processor is not None and self.swin_processor is not None:
+        if self.training and self.mamba_processor is not None and self.swin_processor is not None and getattr(self, 'drop_branch_prob', 0.0) > 0:
             # 期望不变缩放：保留分支除以(1-p)
             keep_scale = 1.0 / (1.0 - self.drop_branch_prob)
             rand_val = torch.rand(1, device=x.device)
@@ -486,22 +486,22 @@ class EncoderUnit(nn.Module):
 
 class Encoder(nn.Module):
     """多尺度Token编码器：处理4个尺度得到token表示"""
-    def __init__(self, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2, training=True):
+    def __init__(self, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2):
         super().__init__()
         
         self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=3, embed_dim=96)
 
         self.encoder_unit0 = EncoderUnit(embed_dim=96, grid_size=64, ori_img_size=256, mamba_blocks=mamba_blocks[0], swin_blocks=swin_blocks[0], 
-                                    window_size=8, drop_branch_prob=drop_branch_prob, training=training, need_downsample=False)
+                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=False)
         
         self.encoder_unit1 = EncoderUnit(embed_dim=192, grid_size=32, ori_img_size=256, mamba_blocks=mamba_blocks[1], swin_blocks=swin_blocks[1], 
-                                    window_size=8, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
+                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=True)
   
         self.encoder_unit2 = EncoderUnit(embed_dim=384, grid_size=16, ori_img_size=256, mamba_blocks=mamba_blocks[2], swin_blocks=swin_blocks[2], 
-                                    window_size=4, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
+                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True)
         
         self.encoder_unit3 = EncoderUnit(embed_dim=768, grid_size=8, ori_img_size=256, mamba_blocks=mamba_blocks[3], swin_blocks=swin_blocks[3], 
-                                    window_size=4, drop_branch_prob=drop_branch_prob, training=training, need_downsample=True)
+                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True)
     
     def forward(self, x_in):
         # x_in: (B, 3, 256, 256)

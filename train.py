@@ -21,6 +21,7 @@ scaler = amp.GradScaler()
 from set_seed import set_seed 
 from torchvision.utils import make_grid
 from util.csv import write_csv_row, _to_float
+from util.eval_util import _collect_and_zero_probs, eval_no_dropout
 
 
 warnings.filterwarnings('ignore')
@@ -60,12 +61,13 @@ opts.debug_monitor_layer_grad = 1 # # debug模式开启时 epoch和size都要为
 opts.draw_attention_map = False # 注册cbam钩子 画注意力热力图 训练数据集要改 epoch和size都要为1 要load模型 batchsize要改1
 opts.sampler_size1 = 0
 opts.sampler_size2 = 0
-opts.sampler_size3 = 80
-opts.test_size = [200,0,0]
+opts.sampler_size3 = 8
+opts.sampler_size4 = 0
+opts.sampler_size5 = 12
+opts.test_size = [2,0,0,0,2,0]
 opts.epoch = 40
-opts.training = False # 训练模式 False为测试模式
-# opts.model_path='./model_fit/model_latest.pth'  
-opts.model_path=None  #如果要load就注释我
+opts.model_path='./model_fit/model_latest.pth'  
+# opts.model_path=None  #如果要load就注释我
 
 current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
  
@@ -73,21 +75,20 @@ current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
 # nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train.log 2>&1 &
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = MTRREngine(opts, device, training=opts.training)
+model = MTRREngine(opts, device)
 # model.count_parameters()
 # 应用改进的初始化
 print("Applying improved initialization...")
 
 if opts.debug_monitor_layer_stats or opts.debug_monitor_layer_grad:
-    opts.training = True # 训练模式 False为测试模式
     opts.epoch = 300
     opts.batch_size = 8
     opts.sampler_size1 = 0
     opts.sampler_size2 = 0
-    opts.sampler_size3 = 8
+    opts.sampler_size3 = 800
     opts.sampler_size4 = 0
-    opts.sampler_size5 = 12
-    opts.test_size = [2,0,0,0,2,0]
+    opts.sampler_size5 = 1200
+    opts.test_size = [200,0,0,0,200,0]
     if opts.debug_monitor_layer_stats:
         os.remove('./debug/state.log') if os.path.exists('./debug/state.log') else None
         model.monitor_layer_stats()# 注册
@@ -148,17 +149,13 @@ test_loader = torch.utils.data.DataLoader(test_data, batch_size=4, shuffle=False
 
 
 total_train_step = 0
-
 total_test_step = 0
 
 run_times = []
-tabel=[]
 
 loss_function = CustomLoss().to(device)
 
-min_loss=1000 # 初始loss 尽可能大
-max_psnr=0
-max_ssim=0
+
 
 
 # tensorboard_writer = SummaryWriter("./logs")
@@ -223,9 +220,19 @@ if __name__ == '__main__':
 
     # 网络load 以及继承上次的epoch和学习参数
     if opts.model_path is not None and os.path.exists(opts.model_path):
-        epoch_last_num = model.load_checkpoint(optimizer)
+        epoch_last_num,best_val_loss,best_val_psnr,best_val_ssim,early_stopping_counter = model.load_checkpoint(optimizer,scheduler)
     else:
         epoch_last_num = None
+        best_val_loss = None
+        best_val_psnr = None
+        best_val_ssim = None
+        early_stopping_counter = 0
+
+    min_loss = best_val_loss if best_val_loss is not None else float('inf') # 初始loss 尽可能大
+    max_psnr = best_val_psnr if best_val_psnr is not None else 0
+    max_ssim = best_val_ssim if best_val_ssim is not None else 0
+    early_stopping.best_loss = float(min_loss)
+    early_stopping.counter = early_stopping_counter
 
     train_begin=False
     epoch_start_num = 0
@@ -244,7 +251,8 @@ if __name__ == '__main__':
         t1 = time.time()
         print("-----------第{}轮训练开始-----------".format(i + 1))
         print(" train data length: {} batch size: {}".format((len(train_loader))*opts.batch_size, opts.batch_size))
-        
+        model.train()
+
         total_train_loss=0
         train_pbar = tqdm(
             train_loader,
@@ -406,138 +414,140 @@ if __name__ == '__main__':
         total_test_psnr = 0
         total_test_ssim = 0
 
+        model.eval()
         with torch.no_grad():
-            print("test data length: {} batch size: {}".format(len(test_data),opts.batch_size))
-            test_pbar = tqdm(
-                test_loader,
-                desc="Validating",
-                total=len(test_loader),
-                ncols=150,  # 建议宽度根据指标数量调整
-                dynamic_ncols=False,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
-            )          
+            with eval_no_dropout(model):
+                print("test data length: {} batch size: {}".format(len(test_data),opts.batch_size))
+                test_pbar = tqdm(
+                    test_loader,
+                    desc="Validating",
+                    total=len(test_loader),
+                    ncols=150,  # 建议宽度根据指标数量调整
+                    dynamic_ncols=False,
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+                )          
 
-            # 指标累计器（加权到样本级）
-            sum_psnr = 0.0
-            sum_ssim = 0.0
-            sum_lmse = 0.0
-            sum_ncc  = 0.0
-            sample_cnt = 0    
+                # 指标累计器（加权到样本级）
+                sum_psnr = 0.0
+                sum_ssim = 0.0
+                sum_lmse = 0.0
+                sum_ncc  = 0.0
+                sample_cnt = 0    
 
-            for n1 , test_data1 in enumerate(test_pbar):
-                model.set_input(test_data1)
-                model.inference()
-                visuals_test = model.get_current_visuals()
-                test_imgs = visuals_test['I'].to(device)
-                test_ipt = visuals_test['Ic'].to(device)
-                test_label1 = visuals_test['T'].to(device)
-                test_label2 = visuals_test['R'].to(device)
+                for n1 , test_data1 in enumerate(test_pbar):
+                    model.set_input(test_data1)
+                    model.inference()
+                    visuals_test = model.get_current_visuals()
+                    test_imgs = visuals_test['I'].to(device)
+                    test_ipt = visuals_test['Ic'].to(device)
+                    test_label1 = visuals_test['T'].to(device)
+                    test_label2 = visuals_test['R'].to(device)
 
-                test_fake_Ts = visuals_test['fake_T'].to(device)
-                 
-                test_fake_Rs = visuals_test['fake_R'].to(device)
-                
-                test_rcmaps = visuals_test['c_map'].to(device)
-                
-                _,_,_,_,_,loss = loss_function(test_fake_Ts, test_label1, test_ipt, test_rcmaps, test_fake_Rs, test_label2)
-                total_test_loss += loss.item()
-
-
-                # 计算psnr与ssim与NCC与LMSN
-                index = quality_assess(test_fake_Ts.to('cpu'), test_label1.to('cpu'))
-                file_name, psnr, ssim, lmse, ncc = test_data1['fn'], index['PSNR'], index['SSIM'], index['LMSE'], index['NCC']
-                # 数据集返回时 只要batchsize不为0 就返回的是列表
-                res = {'file':str(file_name),'PSNR':psnr,'SSIM':ssim,'LMSE':lmse,'NCC':ncc}
-                total_test_psnr = total_test_psnr + res['PSNR']
-                total_test_ssim = total_test_ssim + res['SSIM']
-                
-                # 检查文件是否存在，不存在则写入表头
-                file_exists1 = os.path.isfile(index_file_path)
-
-                # with open(index_file_path, "a", newline='') as f:
-                #     writer = csv.DictWriter(f, fieldnames=["epoch"] + list(res.keys()))
-                #     if not file_exists1:
-                #         writer.writeheader()
-                #     row = {"epoch": i}
-                #     # Convert all tensor values to float
-                #     for k, v in res.items():
-                #         if type(v) == str:
-                #             row[k] = v
-                #         else:
-                #             row[k] = v.item() if hasattr(v, "item")  else float(v)
-                #     writer.writerow(row)
-
-                file_name = test_data1['fn']          # 可能是字符串或列表
-                psnr = _to_float(index['PSNR'])
-                ssim = _to_float(index['SSIM'])
-                lmse = _to_float(index['LMSE'])
-                ncc  = _to_float(index['NCC'])
-
-                # 统计该 batch 对应的样本数
-                try:
-                    batch_n = len(file_name)          # 列表时
-                except TypeError:
-                    batch_n = 1                       # 字符串/标量时
-
-                # 累计（按样本数加权）
-                sum_psnr += psnr * batch_n
-                sum_ssim += ssim * batch_n
-                sum_lmse += lmse * batch_n
-                sum_ncc  += ncc  * batch_n
-                sample_cnt += batch_n
-
-                if i % 5 == 0 & total_test_step % 1 == 0:
-                    # save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
-                    # # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
-                    # save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
-                    # save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
-
-                    # test_fake_TList = visuals_test['fake_T']
-                    # test_fake_TList_cat = test_fake_TList
-                    # save_image(test_fake_TList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_fakeT.png'), nrow=4)
-                    # # torch.save(test_fake_TList_cat,os.path.join(output_dir6,f'epoch{i}+{total_test_step}+fakeT-tensor.pt'))
-
-                    # test_fake_RList = visuals_test['fake_R']
-                    # test_fake_RList_cat = test_fake_RList
-                    # save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
-
-                    B = test_imgs.size(0)
-
-                    # 每行各自拼 batch
-                    grid_in  = make_grid(test_imgs, nrow=B, padding=2)
-                    grid_out = make_grid(test_fake_Ts, nrow=B, padding=2)
-                    grid_tgt = make_grid(test_label1, nrow=B, padding=2)
-
-                    # 高度方向拼接成三行
-                    grid_all = torch.cat([grid_in, grid_out, grid_tgt], dim=1)  # dim=1 是 H 维度
-
-                    # 调用你已有的 save_image 保存
-                    save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-grid.png'))
+                    test_fake_Ts = visuals_test['fake_T'].to(device)
+                    
+                    test_fake_Rs = visuals_test['fake_R'].to(device)
+                    
+                    test_rcmaps = visuals_test['c_map'].to(device)
+                    
+                    _,_,_,_,_,loss = loss_function(test_fake_Ts, test_label1, test_ipt, test_rcmaps, test_fake_Rs, test_label2)
+                    total_test_loss += loss.item()
 
 
+                    # 计算psnr与ssim与NCC与LMSN
+                    index = quality_assess(test_fake_Ts.to('cpu'), test_label1.to('cpu'))
+                    file_name, psnr, ssim, lmse, ncc = test_data1['fn'], index['PSNR'], index['SSIM'], index['LMSE'], index['NCC']
+                    # 数据集返回时 只要batchsize不为0 就返回的是列表
+                    res = {'file':str(file_name),'PSNR':psnr,'SSIM':ssim,'LMSE':lmse,'NCC':ncc}
+                    total_test_psnr = total_test_psnr + res['PSNR']
+                    total_test_ssim = total_test_ssim + res['SSIM']
+                    
+                    # 检查文件是否存在，不存在则写入表头
+                    file_exists1 = os.path.isfile(index_file_path)
+
+                    # with open(index_file_path, "a", newline='') as f:
+                    #     writer = csv.DictWriter(f, fieldnames=["epoch"] + list(res.keys()))
+                    #     if not file_exists1:
+                    #         writer.writeheader()
+                    #     row = {"epoch": i}
+                    #     # Convert all tensor values to float
+                    #     for k, v in res.items():
+                    #         if type(v) == str:
+                    #             row[k] = v
+                    #         else:
+                    #             row[k] = v.item() if hasattr(v, "item")  else float(v)
+                    #     writer.writerow(row)
+
+                    file_name = test_data1['fn']          # 可能是字符串或列表
+                    psnr = _to_float(index['PSNR'])
+                    ssim = _to_float(index['SSIM'])
+                    lmse = _to_float(index['LMSE'])
+                    ncc  = _to_float(index['NCC'])
+
+                    # 统计该 batch 对应的样本数
+                    try:
+                        batch_n = len(file_name)          # 列表时
+                    except TypeError:
+                        batch_n = 1                       # 字符串/标量时
+
+                    # 累计（按样本数加权）
+                    sum_psnr += psnr * batch_n
+                    sum_ssim += ssim * batch_n
+                    sum_lmse += lmse * batch_n
+                    sum_ncc  += ncc  * batch_n
+                    sample_cnt += batch_n
+
+                    if i % 5 == 0 & total_test_step % 1 == 0:
+                        # save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
+                        # # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
+                        # save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
+                        # save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
+
+                        # test_fake_TList = visuals_test['fake_T']
+                        # test_fake_TList_cat = test_fake_TList
+                        # save_image(test_fake_TList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_fakeT.png'), nrow=4)
+                        # # torch.save(test_fake_TList_cat,os.path.join(output_dir6,f'epoch{i}+{total_test_step}+fakeT-tensor.pt'))
+
+                        # test_fake_RList = visuals_test['fake_R']
+                        # test_fake_RList_cat = test_fake_RList
+                        # save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
+
+                        B = test_imgs.size(0)
+
+                        # 每行各自拼 batch
+                        grid_in  = make_grid(test_imgs, nrow=B, padding=2)
+                        grid_out = make_grid(test_fake_Ts, nrow=B, padding=2)
+                        grid_tgt = make_grid(test_label1, nrow=B, padding=2)
+
+                        # 高度方向拼接成三行
+                        grid_all = torch.cat([grid_in, grid_out, grid_tgt], dim=1)  # dim=1 是 H 维度
+
+                        # 调用你已有的 save_image 保存
+                        save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-grid.png'))
 
 
-                total_test_step += 1
-                test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
-                test_pbar.update(1)
 
-            # 计算验证集“样本平均”指标
-            avg_psnr = sum_psnr / max(1, sample_cnt)
-            avg_ssim = sum_ssim / max(1, sample_cnt)
-            avg_lmse = sum_lmse / max(1, sample_cnt)
-            avg_ncc  = sum_ncc  / max(1, sample_cnt)
-            # 写CSV（每轮一次）
-            val_fields = ["epoch", "num_samples", "PSNR", "SSIM", "LMSE", "NCC"]
-            val_row    = {"epoch": i + 1, "num_samples": sample_cnt,
-                        "PSNR": avg_psnr, "SSIM": avg_ssim, "LMSE": avg_lmse, "NCC": avg_ncc}
-            write_csv_row(index_file_path, val_fields, val_row)
 
-            # 更新学习率
-            scheduler.step(total_test_loss)
-            test_pbar.close()
+                    total_test_step += 1
+                    test_pbar.set_postfix({'loss':loss.item(),'psnr':res['PSNR'], 'ssim':res['SSIM'], 'lmse':res['LMSE'],'ncc': res['NCC']})
+                    test_pbar.update(1)
 
-            epoch_num = {"epoch":i}
-            # model.state_dict.update(epoch)
+                # 计算验证集“样本平均”指标
+                avg_psnr = sum_psnr / max(1, sample_cnt)
+                avg_ssim = sum_ssim / max(1, sample_cnt)
+                avg_lmse = sum_lmse / max(1, sample_cnt)
+                avg_ncc  = sum_ncc  / max(1, sample_cnt)
+                # 写CSV（每轮一次）
+                val_fields = ["epoch", "num_samples", "PSNR", "SSIM", "LMSE", "NCC"]
+                val_row    = {"epoch": i + 1, "num_samples": sample_cnt,
+                            "PSNR": avg_psnr, "SSIM": avg_ssim, "LMSE": avg_lmse, "NCC": avg_ncc}
+                write_csv_row(index_file_path, val_fields, val_row)
+
+                # 更新学习率
+                scheduler.step(total_test_loss)
+                test_pbar.close()
+
+                epoch_num = {"epoch":i}
+                # model.state_dict.update(epoch)
 
         avg_test_loss = total_test_loss / total_test_step
         avg_test_psnr = total_test_psnr / total_test_step
@@ -562,14 +572,24 @@ if __name__ == '__main__':
                 'net_c': model.net_c.state_dict(),
                 'netG_T': model.netG_T.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': avg_test_loss,
+                'best_val_psnr': max_psnr,
+                'best_val_ssim': max_ssim,
                 'lr': current_lr,
+                'early_stopping_counter': early_stopping.counter,
             }
         else:
             state = {
                 'epoch': i, 
                 'netG_T': model.netG_T.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': avg_test_loss,
+                'best_val_psnr': max_psnr,
+                'best_val_ssim': max_ssim,                
                 'lr': current_lr,
+                'early_stopping_counter': early_stopping.counter,
             }
 
             

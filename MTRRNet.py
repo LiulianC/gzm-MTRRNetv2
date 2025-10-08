@@ -367,10 +367,9 @@ class MTRRNet(nn.Module):
     多尺度编码 → Token融合 → 统一解码
     频带分工：低频→Mamba，高频→Swin
     """
-    def __init__(self, use_legacy=False, training=True):
+    def __init__(self, use_legacy=False):
         super().__init__()
         self.use_legacy = use_legacy
-        self.training = training
         
         if use_legacy:
             # 使用旧实现的组件
@@ -394,8 +393,7 @@ class MTRRNet(nn.Module):
         self.token_encoder = Encoder(
             mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
-            drop_branch_prob=0.2,
-            training=self.training                      # 启用训练模式以支持随机失活
+            drop_branch_prob=0.2
         )
         
         # Token SubNet：多尺度token融合
@@ -464,12 +462,12 @@ class MTRRNet(nn.Module):
 
 class MTRREngine(nn.Module):
  
-    def __init__(self, opts=None, device='cuda', training=True, net_c=None):
+    def __init__(self, opts=None, device='cuda', net_c=None):
         super(MTRREngine, self).__init__()
         self.device = device 
         self.opts  = opts
         self.visual_names = ['fake_T', 'fake_R', 'c_map', 'I', 'Ic', 'T', 'R']
-        self.netG_T = MTRRNet(training=training).to(device)  
+        self.netG_T = MTRRNet().to(device)  
         self.net_c = net_c  
 
 
@@ -480,11 +478,11 @@ class MTRREngine(nn.Module):
 
 
 
-    def load_checkpoint(self, optimizer):
+    def load_checkpoint(self, optimizer,scheduler):
         if self.opts.model_path is not None:
             model_path = self.opts.model_path
             print('Load the model from %s' % model_path)
-            model_state = torch.load(model_path, map_location=str(self.device))
+            model_state = torch.load(model_path, map_location=str(self.device),weights_only=False)
             
             self.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()},strict=True)
 
@@ -501,6 +499,17 @@ class MTRREngine(nn.Module):
                         for param_group in optimizer.param_groups:
                             param_group['lr'] = model_state['lr']
 
+            if 'scheduler_state_dict' in model_state:
+                scheduler.load_state_dict(model_state['scheduler_state_dict'])
+
+            best_val_loss = model_state.get('best_val_loss', None)
+
+            best_val_psnr = model_state.get('best_val_psnr', None)
+
+            best_val_ssim = model_state.get('best_val_ssim', None)                      
+
+            early_stopping_counter = model_state.get('early_stopping_counter', 0)  
+
             if self.net_c is not None:
                 if 'net_c' in model_state:
                     try:
@@ -513,7 +522,7 @@ class MTRREngine(nn.Module):
 
             epoch = model_state.get('epoch', None)
             print('Loaded model at epoch %d' % (epoch+1) if epoch is not None else 'Loaded model without epoch info')
-            return epoch
+            return epoch,best_val_loss,best_val_psnr,best_val_ssim,early_stopping_counter
         
 
     def get_current_visuals(self):
@@ -589,6 +598,7 @@ class MTRREngine(nn.Module):
 
                 if param.grad is not None:
                     is_nan = math.isnan(param.grad.mean().item()) or math.isnan(param.grad.std().item())
+                    is_nan = False
                     if is_nan or self.opts.always_print:
                         if param.grad is not None:
                             msg = (

@@ -25,9 +25,9 @@ class CustomLoss(torch.nn.Module):
         
         # 2. 调整损失权重，避免过大权重
         self.ssim_loss_weight = 0.5
-        self.vgg_loss_weight = 1  # 从0.7降低到0.5，减少VGG损失的影响
+        self.vgg_loss_weight = 0.3  # 从0.7降低到0.5，减少VGG损失的影响
         self.mse_loss_weight = 0.3
-        self.color_loss_weight = 0.4
+        self.color_loss_weight = 0
         
         self.fake_R_weight = 0.3
         self.fake_T_weight = 1.0
@@ -35,16 +35,6 @@ class CustomLoss(torch.nn.Module):
         self.all_img_weight = 0
 
     def forward(self, fake_Ts, label1, input_image, rcmaps, fake_Rs, label2):
-
-
-        # 3. 使用eps参数确保所有输入在有效范围内
-        # eps = 1e-6
-        # fake_Ts = torch.clamp(fake_Ts, eps, 1.0-eps)
-        # fake_Rs = torch.clamp(fake_Rs, eps, 1.0-eps)
-        # label1 = torch.clamp(label1, eps, 1.0-eps)
-        # label2 = torch.clamp(label2, eps, 1.0-eps)
-        # input_image = torch.clamp(input_image, eps, 1.0-eps)
-        # rcmaps = torch.clamp(rcmaps, eps, 1.0-eps)
 
         # 计算fake_Rs的损失
         fake_R_mse_loss = F.mse_loss(fake_Rs, label2) * self.mse_loss_weight
