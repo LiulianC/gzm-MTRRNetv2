@@ -56,22 +56,22 @@ def init_all_weights(model: nn.Module):
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if param.dim() >= 2 and 'head.weight' in name.lower():
-            param.data -= param.data.mean()
+        # if param.dim() >= 2 and 'head.weight' in name.lower():
+        #     param.data -= param.data.mean()
 
-    # 新增：特殊初始化线性层
-    for name, m in model.named_modules():
-        if isinstance(m, nn.Linear):
-            # Xavier初始化 + 缩小增益
-            nn.init.xavier_normal_(m.weight, gain=0.01)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0.01)  # 避免死神经元
+    # # 新增：特殊初始化线性层
+    # for name, m in model.named_modules():
+    #     if isinstance(m, nn.Linear):
+    #         # Xavier初始化 + 缩小增益
+    #         nn.init.xavier_normal_(m.weight, gain=0.01)
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0.01)  # 避免死神经元
                 
-    # 新增：Mamba层特殊初始化
-    for name, param in model.named_parameters():
-        if 'mamba' in name and 'weight' in name:
-            if param.dim() == 2:  # 线性层权重
-                nn.init.kaiming_normal_(param, mode='fan_in', nonlinearity='linear')
+    # # 新增：Mamba层特殊初始化
+    # for name, param in model.named_parameters():
+    #     if 'mamba' in name and 'weight' in name:
+    #         if param.dim() == 2:  # 线性层权重
+    #             nn.init.kaiming_normal_(param, mode='fan_in', nonlinearity='linear')
 
 
 class AAF(nn.Module):
@@ -307,7 +307,7 @@ class VSSTokenMambaModule(nn.Module):
         ssm_act_layer=nn.SiLU,
         ssm_conv=3,
         ssm_conv_bias=True,
-        ssm_drop_rate=0.0, 
+        ssm_drop_rate=0.05, 
         ssm_init="v0",
         forward_type="v2",
         # ===========================
@@ -364,7 +364,9 @@ class SwinTokenBlock(nn.Module):
                     num_heads=num_heads,
                     window_size=window_size,
                     shift_size=shift_size,
-                    mlp_ratio=4.0
+                    mlp_ratio=4.0,
+                    attn_drop = 0.05,
+                    drop_path = 0.05,
                 )
             ))
     
@@ -683,9 +685,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[1]//2),            
         )
         self.convblock01 = nn.Sequential(
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )        
 
 
@@ -696,9 +698,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[2]//2),
         )
         self.convblock12 = nn.Sequential(
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )
         
 
@@ -709,9 +711,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[3]//2),            
         )
         self.convblock23 = nn.Sequential(
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1e-6, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )
         
 

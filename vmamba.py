@@ -1293,7 +1293,7 @@ class mamba_init:
 
 # support: v0, v0seq
 # Input (B,H,W,C)
-#    │
+#    │ 
 # Linear → split → x / z
 #    │
 # Depthwise Conv (x)
@@ -1587,8 +1587,8 @@ class SS2Dv2:
         selective_scan_backend = None, # 指定 selective_scan 的计算后端 不指定则默认使用cuda
         # ==============================
         # scan_mode = "cross2d",
-        # scan_mode = "roate2d",
-        scan_mode = "bidi", # 扫描模式，bidi=双向扫描（token友好型编码器，仅支持此模式）
+        scan_mode = "roate2d",
+        # scan_mode = "bidi", # 扫描模式，bidi=双向扫描（token友好型编码器，仅支持此模式）
         scan_force_torch = False, # 是否强制使用 torch 实现，而非 CUDA/其他后端
         # ==============================
         **kwargs,
@@ -1623,6 +1623,10 @@ class SS2Dv2:
             xs = cross_scan_fn(x, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch) 
             # (B, C, H, W) → (B, 4, C, L) 不同方向的扫描序列
             
+            # print('xs:', xs.mean().item(), xs.std().item(), xs.shape)        # 期望非零
+            # print('xs_flat:', xs.view(B, -1, L).mean().item(),
+            #                 xs.view(B, -1, L).std().item())
+
             # 2️⃣ 把 cross_scan_fn 得到的 (B, 4, D, L) 做投影，拆分出后续 SSM（Mamba 部分）需要的参数
             x_dbl = self.x_proj(xs.view(B, -1, L)) 
             # (B, K*D, L) → (B, K*(R+N+N), L)

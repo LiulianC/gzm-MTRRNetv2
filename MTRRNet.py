@@ -482,7 +482,7 @@ class MTRREngine(nn.Module):
         if self.opts.model_path is not None:
             model_path = self.opts.model_path
             print('Load the model from %s' % model_path)
-            model_state = torch.load(model_path, map_location=str(self.device),weights_only=False)
+            model_state = torch.load(model_path, map_location=str(self.device), weights_only=False)
             
             self.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()},strict=True)
 
@@ -575,7 +575,7 @@ class MTRREngine(nn.Module):
 
                 is_nan = math.isnan(mean) or math.isnan(std)
                 if is_nan or self.opts.always_print:
-                    msg = f"{layer_name:<50} | Mean: {mean:>15.6f} | Std: {std:>15.6f} | Shape: {tuple(output.shape)}"
+                    msg = f"{layer_name:<100} | Mean: {mean:>15.6f} | Std: {std:>15.6f} | Shape: {tuple(output.shape)}"
                     # print(msg)
                     with open('./debug/state.log', 'a') as f:
                         f.write(msg + '\n')# 修正钩子函数参数（正确接收module, input, output）

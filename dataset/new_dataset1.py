@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch.utils.data
 import torchvision.transforms.functional as TF
+import torchvision.transforms as T
 from PIL import Image
 from scipy.signal import convolve2d
 from scipy.stats import truncnorm
@@ -49,7 +50,7 @@ def paired_data_transforms(img_1, img_2, img_3, unaligned_transforms=False):
         j = random.randint(0, w - tw)
         return i, j, th, tw
 
-    # 随机缩放​​：保持宽高比，缩放到 [320, 640] 之间的随机偶数尺寸
+    # 随机缩放​​：保持宽高比，缩放到 [256, 640] 之间的随机偶数尺寸
     target_size = int(random.randint(256, 640) / 2.) * 2
     ow, oh = img_1.size
     if ow >= oh:
@@ -280,7 +281,7 @@ class DSRDataset(BaseDataset):
 # size：限制加载的数据量 当size=0时 len=0 数据集程序会当成index_out错误自动停止
 class DSRTestDataset(BaseDataset):
     def __init__(self, datadir, fns=None, size=None, enable_transforms=False, unaligned_transforms=False,
-                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256]):
+                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256], SamplerSize=False):
         super(DSRTestDataset, self).__init__()
         self.size = size
         self.datadir = datadir
@@ -324,20 +325,36 @@ class DSRTestDataset(BaseDataset):
                     self.T_paths.append((os.path.join(self.datadir, T)))
                     R = file.replace('-input.png', '-label2.png')
                     self.R_paths.append((os.path.join(self.datadir, R)))
-        if size == 0:
-            self.I_paths_s = []
-            self.T_paths_s = []
-            self.R_paths_s = []
+        
+        
+        # if size == 0:
+        #     self.I_paths_s = []
+        #     self.T_paths_s = []
+        #     self.R_paths_s = []
 
-        elif size is not None and size<=len(self.I_paths): # 如果有size控制，那截取size个元素,而且是随机截取
-            zipped = list(zip(self.I_paths,self.T_paths,self.R_paths))
-            sampled_tuples = random.sample(zipped, size)
-            self.I_paths_s,self.T_paths_s,self.R_paths_s=zip(*sampled_tuples)
+        # elif size is not None and size<=len(self.I_paths): # 如果有size控制，那截取size个元素,而且是随机截取
+        #     zipped = list(zip(self.I_paths,self.T_paths,self.R_paths))
+        #     sampled_tuples = random.sample(zipped, size)
+        #     self.I_paths_s,self.T_paths_s,self.R_paths_s=zip(*sampled_tuples)
+        # else:
+        #     self.I_paths_s,self.T_paths_s,self.R_paths_s=self.I_paths,self.T_paths,self.R_paths
+
+        if size == 0:
+            self.I_paths_s, self.T_paths_s, self.R_paths_s = [], [], []
+        elif size is not None and size <= len(self.I_paths) and SamplerSize:
+            # 如果需要随机抽样
+            zipped = list(zip(self.I_paths, self.T_paths, self.R_paths))
+            sampled = random.sample(zipped, size)
+            self.I_paths_s, self.T_paths_s, self.R_paths_s = zip(*sampled)
+        elif size is not None and size > 0 and size <= len(self.I_paths):
+            # 在0~最大长度范围内平均采样size个样本
+            total_length = len(self.I_paths)
+            indices = np.linspace(0, total_length - 1, size, dtype=int)
+            self.I_paths_s = [self.I_paths[i] for i in indices]
+            self.T_paths_s = [self.T_paths[i] for i in indices]
+            self.R_paths_s = [self.R_paths[i] for i in indices]
         else:
             self.I_paths_s,self.T_paths_s,self.R_paths_s=self.I_paths,self.T_paths,self.R_paths
-
-
-
 
     def align(self, x1, x2, x3):
         h, w = self.HW[0], self.HW[1]
@@ -622,7 +639,7 @@ class VOCJsonDataset(Dataset):
 class HyperKDataset(Dataset):
     def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
                  enable_transforms=False, unaligned_transforms=False,
-                 if_align=True, HW=[256,256], flag=None, SamplerSize=False):
+                 if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False):
         super(HyperKDataset, self).__init__()
         self.root = root
         self.start = start
@@ -634,6 +651,7 @@ class HyperKDataset(Dataset):
         self.HW = HW
         self.flag = flag
         self.real = True
+        self.color_jitter = color_jitter
 
         self.I_paths = []  # 输入
         self.T_paths = []  # 标签
@@ -684,6 +702,8 @@ class HyperKDataset(Dataset):
             indices = np.linspace(0, total_length - 1, size, dtype=int)
             self.I_paths = [self.I_paths[i] for i in indices]
             self.T_paths = [self.T_paths[i] for i in indices]
+        else:
+            self.I_paths, self.T_paths = self.I_paths, self.T_paths
 
     def align(self, x1, x2, x3):
         h, w = self.HW
@@ -706,6 +726,14 @@ class HyperKDataset(Dataset):
         if self.if_align:
             t_img, m_img, r_img = self.align(t_img, m_img, r_img)
 
+        if self.color_jitter:
+            # 颜色扰动：默认只对 m_img 生效，并重算 r_img
+            m_img, t_img, r_img = self._maybe_color_jitter(
+                m_img, t_img, r_img,
+                p=0.8, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
+                apply_to_label=False, recompute_residual=False
+            )        
+
         T = TF.to_tensor(t_img)
         M = TF.to_tensor(m_img)
         R = TF.to_tensor(r_img)
@@ -716,3 +744,52 @@ class HyperKDataset(Dataset):
 
     def __len__(self):
         return len(self.I_paths)
+
+    # 放在类 HyperKDataset 内部
+    def _maybe_color_jitter(self, m_img, t_img, r_img,
+                            p=0.8,
+                            brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
+                            apply_to_label=False,   # 一般 False：不改 label
+                            recompute_residual=True # True：扰动后重算 r=m-t
+                            ):
+        """对输入图像做颜色扰动：亮度/对比度/饱和度/色调。
+        默认只扰动 m_img；若 apply_to_label=True，则 t_img 同步扰动。
+        """
+        if random.random() >= p:
+            return m_img, t_img, r_img
+
+        # 采样一次固定的扰动参数
+        jitter = T.ColorJitter(brightness=brightness, contrast=contrast,
+                            saturation=saturation, hue=hue)
+        fn_idx, b, c, s, h = T.ColorJitter.get_params(
+            jitter.brightness, jitter.contrast, jitter.saturation, jitter.hue
+        )
+
+        def apply_one(img):
+            # 按随机顺序依次应用 4 个操作
+            for fn_id in fn_idx:
+                if fn_id == 0 and b is not None:
+                    img = TF.adjust_brightness(img, b)
+                elif fn_id == 1 and c is not None:
+                    img = TF.adjust_contrast(img, c)
+                elif fn_id == 2 and s is not None:
+                    img = TF.adjust_saturation(img, s)
+                elif fn_id == 3 and h is not None:
+                    img = TF.adjust_hue(img, h)
+            return img
+
+        # 只扰动 input
+        m_img = apply_one(m_img)
+
+        # （可选）同步扰动 label
+        if apply_to_label:
+            t_img = apply_one(t_img)
+
+        # （可选）重算 residual，保持 r=m-t 一致
+        if recompute_residual:
+            m_np = np.array(m_img, dtype=np.float32)
+            t_np = np.array(t_img, dtype=np.float32)
+            r_np = np.clip(m_np - t_np, 0, 255).astype(np.uint8)
+            r_img = Image.fromarray(r_np)
+
+        return m_img, t_img, r_img
