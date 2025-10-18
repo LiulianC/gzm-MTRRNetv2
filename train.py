@@ -22,7 +22,7 @@ from set_seed import set_seed
 from torchvision.utils import make_grid
 from util.csv import write_csv_row, _to_float
 from util.eval_util import _collect_and_zero_probs, eval_no_dropout
-
+from psdLoss.spec_loss_pack import SpecularityNetLossPack
 
 warnings.filterwarnings('ignore')
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -37,39 +37,24 @@ opts.shuffle = True
 opts.display_id = -1  
 opts.num_workers = 0
 
-opts.enable_finetune = False  # 是否开启微调
-if opts.enable_finetune:
-    # 微调模式：decoder_only / freeze_encoder / freeze_decoder / all
-    opts.ft_mode = getattr(opts, 'ft_mode', 'freeze_encoder')
-    # 以解码器为基准学习率（建议 1e-5~1e-4；你原逻辑里有“lr不能太大”的注释，保守取 1e-5 更稳）
-    opts.base_lr = getattr(opts, 'base_lr', 1e-5)
-    opts.weight_decay = getattr(opts, 'weight_decay', 1e-4)
-    # 判别式学习率倍率
-    opts.lr_mult_encoder = getattr(opts, 'lr_mult_encoder', 0.1)
-    opts.lr_mult_subnet  = getattr(opts, 'lr_mult_subnet',  0.5)
-    opts.lr_mult_decoder = getattr(opts, 'lr_mult_decoder', 1.0)
-    # 是否训练 RDM（默认不训）
-    opts.train_rdm = getattr(opts, 'train_rdm', False)
-    # 线性 warmup 的 epoch 数（0 表示不开）
-    opts.warmup_epochs = getattr(opts, 'warmup_epochs', 3)
-    # 渐进解冻计划（空字符串表示不开）
-    opts.unfreeze_plan = getattr(opts, 'unfreeze_plan', '10:all')
-
-opts.always_print = 1
+opts.always_print = 0
 opts.debug_monitor_layer_stats = 1 # debug模式开启时 epoch和size都要为1 要load模型 可同时打开
 opts.debug_monitor_layer_grad = 1 # # debug模式开启时 epoch和size都要为1 要load模型bash
-opts.draw_attention_map = False # 注册cbam钩子 画注意力热力图 训练数据集要改 epoch和size都要为1 要load模型 batchsize要改1
+
+
+opts.epoch = 300
 opts.sampler_size1 = 0
 opts.sampler_size2 = 0
-opts.sampler_size3 = 8
+opts.sampler_size3 = 800
 opts.sampler_size4 = 0
-opts.sampler_size5 = 120
-opts.test_size = [2,0,0,0,2,0]
-opts.epoch = 40
+opts.sampler_size5 = 1200
+opts.test_size = [200,0,0,0,200,0]
 opts.model_path='./model_fit/model_latest.pth'  
-# opts.model_path=None  #如果要load就注释我
+opts.model_path=None  #如果要load就注释我
+# opts.scheduler_type = 'plateau'  # 'plateau' or 'cosine'
+opts.scheduler_type = 'cosine'  # 'plateau' or 'cosine'
 
-current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
+# current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
  
 
 # nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train.log 2>&1 &
@@ -104,7 +89,7 @@ tissue_gen = '/home/gzm/gzm-MTRRVideo/data/tissue_gen'
 tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVideo/data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
 tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=True, if_align=True,real=True, HW=[256,256], SamplerSize=True)
+tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True)
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
@@ -112,7 +97,7 @@ VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=opts.sampler_size4, enab
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=True, if_align=True, HW=[256,256], flag=None, SamplerSize=True, color_jitter=True)
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=True, color_jitter=True)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -154,14 +139,15 @@ total_test_step = 0
 run_times = []
 
 loss_function = CustomLoss().to(device)
-
+PSD_LossFunc = SpecularityNetLossPack(opt=opts).to(device)
 
 
 
 # tensorboard_writer = SummaryWriter("./logs")
 
 if __name__ == '__main__':
-    set_seed(42)  # 设置随机种子 使得checkpoint和训练结果可复现
+    # set_seed(42)  # 设置随机种子 使得checkpoint和训练结果可复现
+
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     # log_path = os.path.join('./logs', current_time)
     # os.makedirs(log_path, exist_ok=True)
@@ -182,43 +168,159 @@ if __name__ == '__main__':
     os.mkdir(output_dir6)
     os.mkdir(output_dir7)
 
-    # 定义优化器
-    if opts.enable_finetune:
-        # 使用引擎提供的分组/冻结策略 微调
-        param_groups = model.build_finetune_param_groups(opts)
-        optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
-    else:
-        # 日常训练
-        norm_names = ['norm', 'bn', 'running_mean', 'running_var']
-        decay, no_decay = [], []
-        for n, p in model.netG_T.named_parameters():
-            if (p.dim() == 1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma', 'norm', 'bn']):
-                no_decay.append(p)
-            else:
-                decay.append(p)
-        optimizer = torch.optim.Adam([
-            {'params': no_decay, 'weight_decay': 0.0},
-            {'params': decay,    'weight_decay': 1e-4},
-        ], lr=current_lr, betas=(0.5, 0.999), eps=1e-8)
+    param_groups = []
 
+    # 模块名称到学习率的映射
+    LearnRate = 1e-4
+    lr_map = {
+        'token_encoder.patchembed': 1e-4,
+        'token_encoder.encoder_unit0': 1e-4,
+        'token_encoder.encoder_unit1': 1e-4,
+        'token_encoder.encoder_unit2': 1e-4,    
+        'token_encoder.encoder_unit3': 1e-4,
+        'token_subnet1': 1e-4,
+        'token_subnet2': 1e-4,
+        'token_subnet3': 1e-4,
+
+        'token_encoder.encoder_unit0.mamba_processor': 2e-3,
+        'token_encoder.encoder_unit1.mamba_processor': 1e-3,
+        'token_encoder.encoder_unit2.mamba_processor': 9e-4,
+        'token_encoder.encoder_unit3.mamba_processor': 8e-4,
+
+        'token_subnet1.mamba_blocks.1': 5e-3,
+        'token_subnet1.mamba_blocks.2': 5e-3,
+
+        'token_subnet2.mamba_blocks.1': 5e-3,
+        'token_subnet2.mamba_blocks.2': 5e-3,
+        
+        'token_subnet3.mamba_blocks.1': 5e-3,
+        'token_subnet3.mamba_blocks.2': 5e-3,
+
+        'token_decoder1.upsample1': 5e-3,
+        'token_decoder1.upsample2': 5e-3,
+        'token_decoder1.upsample3': 5e-3,
+
+        'token_decoder2.upsample1': 5e-3,
+        'token_decoder2.upsample2': 5e-3,
+        'token_decoder2.upsample3': 5e-3,
+
+        'token_decoder3.upsample1': 5e-3,
+        'token_decoder3.upsample2': 5e-3,
+        'token_decoder3.upsample3': 5e-3,
+
+        'token_decoder1.convblock01': 1e-4,
+        'token_decoder1.convblock12': 1e-4,
+        'token_decoder1.convblock23': 1e-4,
+        
+        'token_decoder2.convblock01': 1e-4,
+        'token_decoder2.convblock12': 1e-4,
+        'token_decoder2.convblock23': 1e-4,
+        
+        'token_decoder3.convblock01': 1e-4,
+        'token_decoder3.convblock12': 1e-4,
+        'token_decoder3.convblock23': 1e-4,
+
+        'token_decoder1.decoder': 5e-3,
+        'token_decoder2.decoder': 5e-3,
+        'token_decoder3.decoder': 5e-3,
+
+    }
+
+    # 为每个模块分别收集参数
+    module_params = {k: {'decay': [], 'no_decay': []} for k in lr_map.keys()}
+    module_params['other'] = {'decay': [], 'no_decay': []}
+
+    for n, p in model.netG_T.named_parameters():
+        if not p.requires_grad:
+            continue
+        
+        # 判断是否需要权重衰减
+        need_decay = not ((p.dim() == 1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma', 'norm', 'bn', 'running_mean', 'running_var']))
+        
+        # 找到参数所属的模块
+        matched = False
+        for module_name in lr_map.keys():
+            if n.startswith(module_name):
+                if need_decay:
+                    module_params[module_name]['decay'].append(p)
+                else:
+                    module_params[module_name]['no_decay'].append(p)
+                matched = True
+                break
+        
+        # 其他模块使用默认学习率 LearnRate
+        if not matched:
+            if need_decay:
+                module_params['other']['decay'].append(p)
+            else:
+                module_params['other']['no_decay'].append(p)
+
+    # 构建优化器参数组
+    for module_name, lr in lr_map.items():
+        if module_params[module_name]['decay']:
+            param_groups.append({
+                'params': module_params[module_name]['decay'],
+                'lr': lr,
+                'weight_decay': 0.0,
+                'name': f'{module_name}_decay'
+            })
+        if module_params[module_name]['no_decay']:
+            param_groups.append({
+                'params': module_params[module_name]['no_decay'],
+                'lr': lr,
+                'weight_decay': 0.0,
+                'name': f'{module_name}_no_decay'
+            })
+
+    # 其他模块使用默认学习率
+    if module_params['other']['decay']:
+        param_groups.append({
+            'params': module_params['other']['decay'],
+            'lr': LearnRate,
+            'weight_decay': 0.0,
+            'name': 'other_decay'
+        })
+    if module_params['other']['no_decay']:
+        param_groups.append({
+            'params': module_params['other']['no_decay'],
+            'lr': LearnRate,
+            'weight_decay': 0.0,
+            'name': 'other_no_decay'
+        })
+
+    # 定义优化器
+    optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
 
     # 定义学习率调度器
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',           # 监控的 quantity 是 loss，我们希望它减小
-        factor=0.5,           # 学习率乘以 0.5
-        patience=5,           # 等待 4 个 epoch 没有 improvement 后才触发 LR 衰减
-        threshold=1e-4,       # 可选：认为 loss 没有显著下降的阈值
-        threshold_mode='rel', # 使用相对阈值
-        cooldown=0,           # 每次衰减后冷却期（可不设）
-        min_lr=1e-8,          # 学习率下限
-        eps=1e-8              # 学习率更新的最小变化
-    )
+    # 选择调度器类型: 'plateau' 或 'cosine'
+    scheduler_type = opts.scheduler_type  # 可选: 'plateau', 'cosine'
+
+    if scheduler_type == 'plateau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',           # 监控的 quantity 是 loss，我们希望它减小
+            factor=0.5,           # 学习率乘以 0.5
+            patience=5,           # 等待 5 个 epoch 没有 improvement 后才触发 LR 衰减
+            threshold=1e-4,       # 可选：认为 loss 没有显著下降的阈值
+            threshold_mode='rel', # 使用相对阈值
+            cooldown=0,           # 每次衰减后冷却期（可不设）
+            min_lr=1e-8,          # 学习率下限
+            eps=1e-8              # 学习率更新的最小变化
+        )
+    elif scheduler_type == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=10,                # 初始周期10轮
+            T_mult=2,              # 每次周期×2
+            eta_min=1e-7,
+        )
+    else:
+        raise ValueError(f"Unsupported scheduler_type: {scheduler_type}")
 
 
 
     # 定义早停
-    early_stopping = EarlyStopping(patience=10, delta=1e-4, verbose=True)
+    early_stopping = EarlyStopping(patience=50, delta=1e-4, verbose=True)
 
     # 网络load 以及继承上次的epoch和学习参数
     if opts.model_path is not None and os.path.exists(opts.model_path):
@@ -264,23 +366,7 @@ if __name__ == '__main__':
             dynamic_ncols=False,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
         )      
-
-
-        # —— 微调线性 warmup（前 warmup_epochs 轮，按各组 initial_lr 线性拉升）——
-        if opts.enable_finetune and getattr(opts, 'warmup_epochs', 0) > 0 and i < opts.warmup_epochs:
-            # 线性比例（第 1~warmup_epochs 轮从 1/warmup_epochs → 1.0）
-            warmup_scale = float(i + 1) / float(max(1, opts.warmup_epochs))
-            # 只有在 build_finetune_param_groups 调用过后才会有 _ft_param_groups_meta
-            meta = getattr(model, '_ft_param_groups_meta', [])
-            # 按记录的 initial_lr 缩放每个 param_group 的 lr（不改 weight_decay 等其他设置）
-            if meta and len(meta) == len(optimizer.param_groups):
-                for gi in range(len(optimizer.param_groups)):
-                    base_lr_i = meta[gi]['initial_lr']
-                    optimizer.param_groups[gi]['lr'] = base_lr_i * warmup_scale
-
-        # —— 渐进解冻（到点再开，避免一开始全量训练不稳）——
-        if opts.enable_finetune:
-            model.progressive_unfreeze(i, opts)        
+   
 
         # 累计器
         epoch_loss_sum = {}     # 每个loss的总和
@@ -296,17 +382,8 @@ if __name__ == '__main__':
 
 
 
-            if opts.draw_attention_map:
-                model.register_cbam_hooks()
-                channel_weights,spatial_weights=model.get_attention_matix() # 打印cbam钩子
-                for i,spatial_weight in enumerate(spatial_weights):
-                    # scale = 256 / spatial_weight.size(0)
-                    spatial_weights[i] = F.interpolate(spatial_weight, size=(256, 256), mode='bilinear', align_corners=False)
-                    save_image(spatial_weights[i], os.path.join('./毕业paper/Spatial_attention/map', f'{train_file_name}-spatial_weight_{i:02d}.png'), normalize=True)                
-            
-            else: 
-                # with amp.autocast(device_type='cuda'):
-                model.inference()
+
+            model.inference()
 
 
 
@@ -316,29 +393,26 @@ if __name__ == '__main__':
             train_label1 =  visuals['T'].to(device)
             train_label2 =  visuals['R'].to(device)
             # 列表的最后一个元素 shape B C H W
-            train_fake_Ts = visuals['fake_T'].to(device)
-            train_fake_Rs = visuals['fake_R'].to(device)
+            train_fake_Ts = visuals['fake_Ts']
+            train_fake_Rs = visuals['fake_Rs']
             train_rcmaps =  visuals['c_map'].to(device)
  
             # with amp.autocast(device_type='cuda'):
-            loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss = loss_function(train_fake_Ts, train_label1, train_ipt, train_rcmaps, train_fake_Rs, train_label2)
+
+
+            _, _, _, _, _, all_loss0 = loss_function(train_fake_Ts[0], train_label1, train_ipt, train_rcmaps, train_fake_Rs[0], train_label2)
+            _, _, _, _, _, all_loss1 = loss_function(train_fake_Ts[1], train_label1, train_ipt, train_rcmaps, train_fake_Rs[1], train_label2)
+            loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss2 = loss_function(train_fake_Ts[2], train_label1, train_ipt, train_rcmaps, train_fake_Rs[2], train_label2)
+
+            # all_loss0, _ = PSD_LossFunc.compute_total(train_fake_Rs[0], train_label1)
+            # all_loss1, _ = PSD_LossFunc.compute_total(train_fake_Rs[1], train_label1)
+            # all_loss2, loss_table = PSD_LossFunc.compute_total(train_fake_Rs[2], train_label1)
+   
+            all_loss = 0.5*all_loss0 + 0.5*all_loss1 + 1.5*all_loss2
+
             total_train_loss +=all_loss.item()
-
-            if torch.isnan(all_loss):
+            if torch.isnan(all_loss2):
                 print("⚠️  Loss is NaN! input:", train_file_name)
-
-            # # Log loss_table to a CSV file
-            # file_exists = os.path.isfile(train_loss_path)
-            # # Write header if file does not exist
-            # with open(train_loss_path, "a", newline='') as f:
-            #     writer = csv.DictWriter(f, fieldnames=["step"] + list(loss_table.keys()))
-            #     if not file_exists:
-            #         writer.writeheader()
-            #     row = {"step": total_train_step}
-            #     # Convert all tensor values to float
-            #     for k, v in loss_table.items():
-            #         row[k] = v.item() if hasattr(v, "item") else float(v)
-            #     writer.writerow(row)
 
             for k, v in loss_table.items():
                 v_val = _to_float(v)
@@ -372,20 +446,19 @@ if __name__ == '__main__':
                 # save_image(train_ipt, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_ipt.png'), nrow=4)
 
                 # save_image(train_input, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_imgs.png'), nrow=4)
-                # train_fake_TList = visuals['fake_T']
+                # train_fake_TList = visuals['s']
                 # save_image(train_fake_TList, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_fakeT.png'), nrow=4)
                 # save_image(train_label1, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_label1.png'), nrow=4)
 
                 save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=4)
-                train_fake_RList = visuals['fake_R']
-                save_image(train_fake_RList, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=4)
+                save_image(visuals['fake_Rs'][-1], os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=4)
 
                 # train_rcmaps_List = visuals['c_map']
                 # train_rcmaps_List_cat = train_rcmaps_List
                 # save_image(train_rcmaps_List_cat, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_Rcmaps_List.png'), nrow=4)
 
                 grid_input = make_grid(train_input, nrow=train_input.size(0), padding=2, normalize=True)
-                grid_fakeT = make_grid(train_fake_Ts, nrow=train_fake_Ts.size(0), padding=2, normalize=True)
+                grid_fakeT = make_grid(train_fake_Ts[-1], nrow=train_fake_Ts[-1].size(0), padding=2, normalize=True)
                 grid_label = make_grid(train_label1, nrow=train_label1.size(0), padding=2, normalize=True)
 
                 # 按行拼接：三行纵向堆叠 (C, H_total, W)
@@ -404,6 +477,7 @@ if __name__ == '__main__':
 
 
             train_pbar.set_postfix({'loss':all_loss.item(),'mseloss':mse_loss.item(), 'vggloss':vgg_loss.item(), 'ssimloss':ssim_loss.item(),'rangeloss':fake_Ts_range_penalty.item(),'current_lr': current_lr})
+            # train_pbar.set_postfix({'loss':all_loss.item(),'pixeloss':loss_table['pixel'].item(),'current_lr': current_lr})
             train_pbar.update(1)
         train_pbar.close()
 
@@ -452,18 +526,20 @@ if __name__ == '__main__':
                     test_label1 = visuals_test['T'].to(device)
                     test_label2 = visuals_test['R'].to(device)
 
-                    test_fake_Ts = visuals_test['fake_T'].to(device)
+                    test_fake_Ts = visuals_test['fake_Ts']
                     
-                    test_fake_Rs = visuals_test['fake_R'].to(device)
+                    test_fake_Rs = visuals_test['fake_Rs']
                     
                     test_rcmaps = visuals_test['c_map'].to(device)
                     
-                    _,_,_,_,_,loss = loss_function(test_fake_Ts, test_label1, test_ipt, test_rcmaps, test_fake_Rs, test_label2)
+
+                    _,_,_,_,_,loss = loss_function(test_fake_Ts[-1], test_label1, test_ipt, test_rcmaps, test_fake_Rs[-1], test_label2)
+                    # loss,_ = PSD_LossFunc.compute_total(test_fake_Rs[-1], test_label1)
+
                     total_test_loss += loss.item()
 
-
                     # 计算psnr与ssim与NCC与LMSN
-                    index = quality_assess(test_fake_Ts.to('cpu'), test_label1.to('cpu'))
+                    index = quality_assess(test_fake_Ts[-1].to('cpu'), test_label1.to('cpu'))
                     file_name, psnr, ssim, lmse, ncc = test_data1['fn'], index['PSNR'], index['SSIM'], index['LMSE'], index['NCC']
                     # 数据集返回时 只要batchsize不为0 就返回的是列表
                     res = {'file':str(file_name),'PSNR':psnr,'SSIM':ssim,'LMSE':lmse,'NCC':ncc}
@@ -473,18 +549,6 @@ if __name__ == '__main__':
                     # 检查文件是否存在，不存在则写入表头
                     file_exists1 = os.path.isfile(index_file_path)
 
-                    # with open(index_file_path, "a", newline='') as f:
-                    #     writer = csv.DictWriter(f, fieldnames=["epoch"] + list(res.keys()))
-                    #     if not file_exists1:
-                    #         writer.writeheader()
-                    #     row = {"epoch": i}
-                    #     # Convert all tensor values to float
-                    #     for k, v in res.items():
-                    #         if type(v) == str:
-                    #             row[k] = v
-                    #         else:
-                    #             row[k] = v.item() if hasattr(v, "item")  else float(v)
-                    #     writer.writerow(row)
 
                     file_name = test_data1['fn']          # 可能是字符串或列表
                     psnr = _to_float(index['PSNR'])
@@ -506,25 +570,12 @@ if __name__ == '__main__':
                     sample_cnt += batch_n
 
                     if (i+1) % 5 == 0 & total_test_step % 1 == 0:
-                        # save_image(test_imgs, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_imgs.png'), nrow=4)
-                        # # save_image(test_ipt, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_ipt.png'), nrow=4)
-                        # save_image(test_label1, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_label1.png'), nrow=4)
-                        # save_image(test_label2, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_reflection.png'), nrow=4)
-
-                        # test_fake_TList = visuals_test['fake_T']
-                        # test_fake_TList_cat = test_fake_TList
-                        # save_image(test_fake_TList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_fakeT.png'), nrow=4)
-                        # # torch.save(test_fake_TList_cat,os.path.join(output_dir6,f'epoch{i}+{total_test_step}+fakeT-tensor.pt'))
-
-                        # test_fake_RList = visuals_test['fake_R']
-                        # test_fake_RList_cat = test_fake_RList
-                        # save_image(test_fake_RList_cat, os.path.join(output_dir6, f'epoch{i}+{total_test_step}-test_FakeR.png'), nrow=4)
 
                         B = test_imgs.size(0)
 
                         # 每行各自拼 batch
                         grid_in  = make_grid(test_imgs, nrow=B, padding=2)
-                        grid_out = make_grid(test_fake_Ts, nrow=B, padding=2)
+                        grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=2)
                         grid_tgt = make_grid(test_label1, nrow=B, padding=2)
 
                         # 高度方向拼接成三行
@@ -551,8 +602,11 @@ if __name__ == '__main__':
                             "PSNR": avg_psnr, "SSIM": avg_ssim, "LMSE": avg_lmse, "NCC": avg_ncc}
                 write_csv_row(index_file_path, val_fields, val_row)
 
-                # 更新学习率
-                scheduler.step(total_test_loss)
+                # 更新学习率（根据调度器类型调用不同的step方法）
+                if scheduler_type == 'plateau':
+                    scheduler.step(total_test_loss)
+                elif scheduler_type == 'cosine':
+                    scheduler.step()
                 test_pbar.close()
 
                 epoch_num = {"epoch":i}
@@ -585,7 +639,6 @@ if __name__ == '__main__':
                 'best_val_loss': avg_test_loss,
                 'best_val_psnr': max_psnr,
                 'best_val_ssim': max_ssim,
-                'lr': current_lr,
                 'early_stopping_counter': early_stopping.counter,
             }
         else:
@@ -597,7 +650,6 @@ if __name__ == '__main__':
                 'best_val_loss': avg_test_loss,
                 'best_val_psnr': max_psnr,
                 'best_val_ssim': max_ssim,                
-                'lr': current_lr,
                 'early_stopping_counter': early_stopping.counter,
             }
 

@@ -9,6 +9,7 @@ from timm.models.swin_transformer import SwinTransformerBlock,SwinTransformerSta
 from timm.layers import LayerNorm2d
 import math
 from timm.models.layers import DropPath
+from typing import List
 
 
 def init_all_weights(model: nn.Module):
@@ -24,86 +25,111 @@ def init_all_weights(model: nn.Module):
     gelu_gain = nn.init.calculate_gain('relu')
 
     def _init(m):
+        # 保护 Mamba2 的初始化 每个模块是独立调用的，在 Mamba2 中 return 不会影响后续的 Linear、LayerNorm 等
+        if isinstance(m, Mamba2):
+            print(f"跳过 Mamba2 初始化: {m}")
+            return        
+        if isinstance(m, Mamba2Simple):
+            print(f"跳过 Mamba2Simple 初始化: {m}")
+            return        
+        if isinstance(m, Mamba):
+            print(f"跳过 Mamba 初始化: {m}")
+            return        
+        if isinstance(m, VSSTokenMambaModule):
+            print(f"跳过 VSSTokenMambaModule 初始化: {m}")
+            return        
+        if isinstance(m, Mamba2Blocks_Standard):
+            print(f"跳过 Mamba2Blocks_Standard 初始化: {m}")
+            return        
+        
         if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Conv1d)):
             if m.weight is not None:
                 nn.init.xavier_uniform_(m.weight, gain=gelu_gain)
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                # nn.init.zeros_(m.bias)
+                nn.init.uniform_(m.bias, -0.1, 0.1)
+
         elif isinstance(m, nn.Linear):
             if m.weight is not None:
                 nn.init.xavier_uniform_(m.weight, gain=gelu_gain)
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                # nn.init.zeros_(m.bias)
+                nn.init.uniform_(m.bias, -0.1, 0.1)
+
         elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm, LayerNorm2d)):
             if getattr(m, 'weight', None) is not None:
                 nn.init.ones_(m.weight)
             if getattr(m, 'bias', None) is not None:
-                nn.init.zeros_(m.bias)
+                # nn.init.zeros_(m.bias)
+                nn.init.uniform_(m.bias, -0.1, 0.1)
+                
         elif isinstance(m, nn.PReLU):
             with torch.no_grad():
                 m.weight.fill_(0.08)
 
         # PatchEmbed 特殊初始化
-        if isinstance(m, PatchEmbed):
-            if hasattr(m, 'proj') and hasattr(m.proj, 'weight') and m.proj.weight is not None:
-                nn.init.xavier_uniform_(m.proj.weight, gain=2.0)
-                if m.proj.bias is not None:
-                    nn.init.zeros_(m.proj.bias)
+        elif isinstance(m, TokenPatchEmbed):
+            nn.init.normal_(m.weight, std=0.02)
 
     model.apply(_init)
 
-    # 第二阶段：只做必要的均值校正（不再乘 0.5）
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        # if param.dim() >= 2 and 'head.weight' in name.lower():
-        #     param.data -= param.data.mean()
 
-    # # 新增：特殊初始化线性层
-    # for name, m in model.named_modules():
-    #     if isinstance(m, nn.Linear):
-    #         # Xavier初始化 + 缩小增益
-    #         nn.init.xavier_normal_(m.weight, gain=0.01)
-    #         if m.bias is not None:
-    #             nn.init.constant_(m.bias, 0.01)  # 避免死神经元
-                
-    # # 新增：Mamba层特殊初始化
-    # for name, param in model.named_parameters():
-    #     if 'mamba' in name and 'weight' in name:
-    #         if param.dim() == 2:  # 线性层权重
-    #             nn.init.kaiming_normal_(param, mode='fan_in', nonlinearity='linear')
+
 
 
 class AAF(nn.Module):
     """
-    输入: List[Tensor], 每个 shape 为 [B, C, H, W]
-    输出: Tensor, shape 为 [B, C, H, W]
+    输入: List[Tensor]，每个 shape 为 [B, L, C] 或 [B, C, H, W]，长度为 num_inputs
+    输出: Tensor，shape 为 [B, L, C] 或 [B, C, H, W]（与输入形状一致）
     """
-    def __init__(self, in_channels, num_inputs): # in_channels 每个图像的通道 num_input 有多少个图像
+    def __init__(self, in_channels: int, num_inputs: int):
         super(AAF, self).__init__()
         self.in_channels = in_channels
         self.num_inputs = num_inputs
-        
-        # 输入 concat 后通道为 C*num_inputs
-        self.attn = nn.Sequential(
-            nn.Conv2d(num_inputs * in_channels, num_inputs * in_channels * 16, kernel_size=1, bias=False, padding_mode='reflect'),
-            nn.Conv2d(num_inputs * in_channels * 16, num_inputs, kernel_size=1, bias=False, padding_mode='reflect'),
-            nn.Softmax(dim=1)  # 对每个位置的 num_inputs 做归一化
-        )
 
-    def forward(self, features):
-        # features: list of Tensors [B, L, C]
-        B, L, C = features[0].shape
-        x = torch.cat(features, dim=2)  # shape: [B, L, C*num_inputs]
-        x = x.permute(0, 2, 1).contiguous().view(B, C * self.num_inputs, int(L**0.5), int(L**0.5))  # shape: [B, C*num_inputs, H, W]
-        x = self.attn(x)     # shape: [B, num_inputs, H, W]
-        x = x.permute(0, 2, 3, 1).contiguous().view(B, L, self.num_inputs)  # shape: [B, L, num_inputs]
-        
-        # 融合：对每个尺度乘以权重后相加
-        out = 0
-        for i in range(self.num_inputs):
-            out += features[i] * x[:, :, i:i+1]            # 广播乘法
-        return out
+    @torch.no_grad()
+    def _check(self, features: List[torch.Tensor]):
+        assert isinstance(features, (list, tuple)) and len(features) == self.num_inputs, \
+            f"Expect {self.num_inputs} inputs, got {len(features)}."
+        shapes = [tuple(x.shape) for x in features]
+        assert all(s == shapes[0] for s in shapes), \
+            f"All inputs must share the same shape, got {shapes}."
+        x = features[0]
+        assert x.dim() in (3, 4), \
+            f"Each input must be 3D [B,L,C] or 4D [B,C,H,W], got dim={x.dim()}."
+        if x.dim() == 4:
+            B, C, H, W = x.shape
+            assert C == self.in_channels, \
+                f"in_channels={self.in_channels} but got C={C}."
+        else:  # 3D [B, L, C]
+            B, L, C = x.shape
+            assert C == self.in_channels, \
+                f"in_channels={self.in_channels} but got C={C}."
+
+    def forward(self, features: List[torch.Tensor]) -> torch.Tensor:
+        """
+        features: List[Tensor]
+            - 每个为 [B, C, H, W]，或 [B, L, C]
+        返回:
+            - 与单个输入同形状
+        """
+        self._check(features)
+
+        x0 = features[0]
+        if x0.dim() == 4:
+            # 4D case: [B, C, H, W] -> stack: [B, N, C, H, W]
+            x = torch.stack(features, dim=1)
+            # 在输入维度N上进行softmax，每个(b,c,h,w)位置的N个值互斥归一化
+            weights = torch.softmax(x, dim=1)           # [B, N, C, H, W]
+            out = (weights * x).sum(dim=1)              # [B, C, H, W]
+            # 你也可以取出每个输入对应的权重张量：weights[:, i] -> [B, C, H, W]
+            return out
+        else:
+            # 3D case: [B, L, C] -> stack: [B, N, L, C]
+            x = torch.stack(features, dim=1)
+            weights = torch.softmax(x, dim=1)           # [B, N, L, C]
+            out = (weights * x).sum(dim=1)              # [B, L, C]
+            return out
 
 
 
@@ -251,19 +277,20 @@ class VSSTokenMambaModule(nn.Module):
     ):
         super().__init__()
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, 2)]   # dpr=[0 0.05 0.1]
         self.channel_first = channel_first
         self.dims = dims
-        self.num_layers = len(depths)
+        self.num_layers = 1
         
 
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
 
-
-            self.layers.append(self._make_layer(
-                dim = self.dims[i_layer],
-                drop_path = dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+            self.layers.append(self._make_layer(    # VSSblock就是mamba堆叠  make_layer堆叠了多个VSSBlock  这里期望make_layer只堆叠一个
+                dim = self.dims[0],
+                depth = depths[0],
+                drop_path = dpr[1],
+                # drop_path = 0.0,
                 use_checkpoint=use_checkpoint,
                 channel_first=self.channel_first,
                 # =================
@@ -296,7 +323,8 @@ class VSSTokenMambaModule(nn.Module):
     @staticmethod
     def _make_layer(
         dim=96, 
-        drop_path=[0.1], 
+        depth=9,
+        drop_path=0.1, 
         use_checkpoint=False, 
         downsample=nn.Identity(),
         channel_first=False,
@@ -318,12 +346,12 @@ class VSSTokenMambaModule(nn.Module):
         **kwargs,
     ):
         # if channel first, then Norm and Output are both channel_first
-        depth = len(drop_path)
+        depth = depth
         blocks = []
         for d in range(depth):
             blocks.append(VSSBlock(
                 hidden_dim=dim, 
-                drop_path=drop_path[d],
+                drop_path=drop_path,
                 channel_first=channel_first,
                 ssm_d_state=ssm_d_state,
                 ssm_ratio=ssm_ratio,
@@ -345,19 +373,258 @@ class VSSTokenMambaModule(nn.Module):
             downsample=downsample,
         ))    
 
+from mamba_ssm.modules.mamba2 import Mamba2  # 默认有残差连接 后置归一化
+from mamba_ssm.modules.mamba_simple import Mamba  # 默认有残差连接 后置归一化
+from mamba_ssm.modules.mamba2_simple import Mamba2Simple  # 默认有残差连接 后置归一化
+class Mamba2Blocks(nn.Module):
+    def __init__(self, dim, num_blocks=1, drop_path_rate=0.05, channel_first=False):
+        super().__init__()
+        self.channel_first = channel_first
+        self.blocks = nn.ModuleList()
+        for _ in range(num_blocks):
+            self.blocks.append(nn.Sequential(
+                Mamba2(d_model=dim,d_state=64,d_conv=4,expand=2),
+                # Mamba2Simple(d_model=dim,d_state=64,d_conv=4,expand=2,headdim=96),
+                # Mamba(d_model=dim,d_state=16,d_conv=4,expand=2),
+                nn.Dropout(drop_path_rate),
+            ))
+    def forward(self, x):
+        # x: (B, H, W, C)
+
+        if self.channel_first: # 变成channel last
+            x = x.permute(0,2,3,1).contiguous()  # (B, H, W, C)
+
+        B,H,W,C = x.shape
+        
+        # 需要 B N C
+        x = x.view(B, -1, C).contiguous()  # (B, N, C)
+
+        for block in self.blocks:
+            x = block(x)  # 逐层残差: x = x + f(LN(x))
+
+        x = x.view(B, H, W, C).contiguous()  # (B, H, W, C)
+
+        if self.channel_first: #变回去
+            x = x.permute(0,3,1,2).contiguous()  # (B, C, H, W)
+
+        return x #(B H W C)
+
+
+
+from functools import partial
+from mamba_ssm.models.mixer_seq_simple import _init_weights, create_block
+try:
+    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
+except ImportError:
+    RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+
+class Mamba2Blocks_Standard(nn.Module):
+    def __init__(
+        self,
+        d_model: int,# token维度
+        n_layer: int,# Mamba2数量
+        d_intermediate: int,# MLP维度 0表示无MLP
+
+        # === Mamba1 配置 ===
+        ssm_cfg={
+            "layer": "Mamba1",    # 指定使用Mamba2
+            # 其他Mamba1参数（可选）
+            "d_state": 16,       # SSM状态维度
+            "d_conv": 4,          # 卷积核大小
+            "expand": 2,          # 扩展因子
+        },
+        # LayerScale：进一步抑制深堆叠残差的幅度增长
+        layer_scale_init: float = None,
+        layer_scale_max: float = None,
+
+
+        # # # === Mamba2 配置 ===
+        # ssm_cfg={
+        #     "layer": "Mamba2",    # 指定使用Mamba2
+        #     # 稳定性相关默认值（可被调用方覆盖）
+        #     "d_state": 64,          # 从64改为16，参考Mamba1稳定配置
+        #     "d_conv": 4,
+        #     "expand": 2,
+        #     # 归一化与gate顺序
+        #     "rmsnorm": True,
+        #     "norm_before_gate": True,
+        #     # dt 初始化与限制（与 fused 路径匹配）
+        #     "dt_min": 1e-3,
+        #     "dt_max": 5e-2,
+        #     "dt_init_floor": 1e-4,
+        #     "dt_limit": (1e-4, 5e-1),
+        #     # 线性与卷积的bias配置（贴近官方默认）
+        #     "bias": False,
+        #     "conv_bias": True,
+        # },
+        # # LayerScale：进一步抑制深堆叠残差的幅度增长
+        # layer_scale_init: float = 1e-4,
+        # layer_scale_max: float = 1e-2,
+
+        attn_layer_idx=None,
+        attn_cfg=None,
+        norm_epsilon: float = 1e-5,
+        rms_norm: bool = True,
+        initializer_cfg=None,
+        fused_add_norm=False,
+        # 关键稳定项：在训练未采用 AMP/混合精度时，保持残差在 FP32 中累加，避免数值漂移
+        residual_in_fp32=True,
+        device='cuda',
+        # 不强制使用 bfloat16，继承全局默认（通常为 FP32）；避免与优化器/其余模块 dtype 不一致导致的不稳定
+        dtype=None,
+
+        channel_first=False,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.residual_in_fp32 = residual_in_fp32
+        self.channel_first = channel_first
+
+        # We change the order of residual and layer norm:
+        # Instead of LN -> Attn / MLP -> Add, we do:
+        # Add -> LN -> Attn / MLP / Mixer, returning both the residual branch (output of Add) and
+        # the main branch (output of MLP / Mixer). The model definition is unchanged.
+        # This is for performance reason: we can fuse add + layer_norm.
+
+
+        self.fused_add_norm = fused_add_norm
+        if self.fused_add_norm:
+            if layer_norm_fn is None or rms_norm_fn is None:
+                raise ImportError("Failed to import Triton LayerNorm / RMSNorm kernels")
+
+        # 合并默认稳定配置与外部传入的 ssm_cfg（外部优先）
+        _default_ssm = {
+            "layer": "Mamba2",
+            "d_state": 16,
+            "d_conv": 4,
+            "expand": 2,
+            # "rmsnorm": True,
+            # "norm_before_gate": True,
+            # "dt_min": 1e-3,
+            # "dt_max": 5e-2,
+            # "dt_init_floor": 1e-4,
+            # "dt_limit": (1e-4, 5e-1),
+            "bias": False,
+            "conv_bias": True,
+        }
+        _ssm_cfg_merged = dict(_default_ssm)
+        if ssm_cfg is not None:
+            _ssm_cfg_merged.update(ssm_cfg)
+
+        self.layers = nn.ModuleList(
+            [
+                create_block(
+                    d_model,
+                    d_intermediate=d_intermediate,
+                    ssm_cfg=_ssm_cfg_merged,
+                    attn_layer_idx=attn_layer_idx,
+                    attn_cfg=attn_cfg,
+                    norm_epsilon=norm_epsilon,
+                    rms_norm=rms_norm,
+                    residual_in_fp32=residual_in_fp32,
+                    fused_add_norm=fused_add_norm,
+                    layer_idx=i,
+                    **factory_kwargs,
+                )
+                for i in range(n_layer)
+            ]
+        )
+
+        # LayerScale stabilizes deep stacks by shrinking each block's update before it enters the
+        # next residual addition. When set to a tiny value (default 1e-3) it tames the gradient norm
+        # growth observed in debug-grad.log without impacting representational capacity.
+        self.layer_scale_max = layer_scale_max
+        if layer_scale_init is not None and layer_scale_init > 0:
+            scale_dtype = torch.float32 if dtype is None else dtype
+            self.layer_scales = nn.ParameterList(
+                [
+                    nn.Parameter(layer_scale_init * torch.ones(d_model, device=device, dtype=scale_dtype))
+                    for _ in range(n_layer)
+                ]
+            )
+        else:
+            self.layer_scales = None
+
+        self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
+            d_model, eps=norm_epsilon, **factory_kwargs
+        )
+
+        self.apply(
+            partial(
+                _init_weights,
+                n_layer=n_layer,
+                **(initializer_cfg if initializer_cfg is not None else {}),
+                n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # 2 if we have MLP
+            )
+        )
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return {
+            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+            for i, layer in enumerate(self.layers)
+        }
+
+    def forward(self, x, inference_params=None, **mixer_kwargs):
+
+        # x: (B, H, W, C)
+
+        if self.channel_first: # 变成channel last
+            x = x.permute(0,2,3,1).contiguous()  # (B, H, W, C)
+
+        B,H,W,C = x.shape
+        
+        # 需要 B N C
+        hidden_states = x.view(B, -1, C).contiguous()  # (B, N, C)
+
+        residual = None
+        for idx, layer in enumerate(self.layers):
+            hidden_states, residual = layer(
+                hidden_states, residual, inference_params=inference_params, **mixer_kwargs
+            )
+            if self.layer_scales is not None:
+                scale_param = self.layer_scales[idx]
+                clamp_max = self.layer_scale_max if self.layer_scale_max is not None else None
+                if clamp_max is not None:
+                    scale_param = torch.clamp(scale_param, min=0.0, max=clamp_max)
+                scale = scale_param.to(hidden_states.dtype).view(1, 1, -1)
+                hidden_states = hidden_states * scale
+                if residual is not None:
+                    residual = residual * scale
+        if not self.fused_add_norm:
+            residual = (hidden_states + residual) if residual is not None else hidden_states
+            hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
+        else:
+            # Set prenorm=False here since we don't need the residual
+            hidden_states = layer_norm_fn(
+                hidden_states,
+                self.norm_f.weight,
+                self.norm_f.bias,
+                eps=self.norm_f.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=self.residual_in_fp32,
+                is_rms_norm=isinstance(self.norm_f, RMSNorm)
+            )
+
+        hidden_states = hidden_states.view(B, H, W, C).contiguous()  # (B, H, W, C)
+
+        if self.channel_first: #变回去
+            hidden_states = hidden_states.permute(0,3,1,2).contiguous()  # (B, C, H, W)    
+
+        return hidden_states
+
 
 
 class SwinTokenBlock(nn.Module):
-    """Swin Transformer处理token，采用x = x + f(LN(x))残差连接"""
+    """Swin Transformer处理token，直接复用内部残差逻辑避免重复叠加。"""
     def __init__(self, dim, input_resolution, num_heads, window_size, num_blocks=1):
         super().__init__()
         self.input_resolution = input_resolution
-        
-        self.blocks = nn.ModuleList()
+
+        blocks = []
         for i in range(num_blocks):
             shift_size = 0 if i % 2 == 0 else window_size // 2
-            self.blocks.append(nn.Sequential(
-                nn.LayerNorm(dim),
+            blocks.append(
                 SwinTransformerBlock(
                     dim=dim,
                     input_resolution=input_resolution,
@@ -365,23 +632,21 @@ class SwinTokenBlock(nn.Module):
                     window_size=window_size,
                     shift_size=shift_size,
                     mlp_ratio=4.0,
-                    attn_drop = 0.05,
-                    drop_path = 0.05,
+                    attn_drop=0.05,
+                    drop_path=0.05,
                 )
-            ))
-    
+            )
+        self.blocks = nn.ModuleList(blocks)
+
     def forward(self, x):
-        # x: (B, N, C) 需要reshape为(B, H, W, C)用于Swin
+        # x: (B, N, C) → reshape 为 (B, H, W, C)
         B, N, C = x.shape
-        
-        # 转换为Swin格式
-        x = x.view(B, int(N**0.5), int(N**0.5), C).contiguous()
-        
+        H = W = int(N ** 0.5)
+        x = x.view(B, H, W, C).contiguous()
+
         for block in self.blocks:
-            residual = x
-            x = block(x) + residual  # 逐层残差: x = x + f(LN(x))
-        
-        # 转换回token格式
+            x = block(x)  # block 已包含 LayerNorm 与残差路径
+
         x = x.view(B, N, C)
         return x
 
@@ -408,8 +673,10 @@ class EncoderUnit(nn.Module):
             self.downSample = nn.Conv2d(embed_dim//2, embed_dim, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
 
         # Mamba处理低频，Swin处理高频
-        self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False) if mamba_blocks > 0 else None
+        # self.mamba_processor = VSSTokenMambaModule(dims=[embed_dim], depths=[mamba_blocks], channel_first=False, drop_path_rate=0.05) if mamba_blocks > 0 else None
         # self.mamba_processor = nn.Identity()
+        # self.mamba_processor = Mamba2Blocks(dim=embed_dim, num_blocks=mamba_blocks, drop_path_rate=0.05) if mamba_blocks > 0 else None
+        self.mamba_processor = Mamba2Blocks_Standard(d_model=embed_dim, n_layer=mamba_blocks, d_intermediate=2*embed_dim) if mamba_blocks > 0 else None
 
         
         if swin_blocks > 0:
@@ -423,6 +690,9 @@ class EncoderUnit(nn.Module):
         # 融合模块
         if self.mamba_processor is not None and self.swin_processor is not None:
             self.fusion = AAF(embed_dim, 2)
+            self.fusion_out = nn.Identity()
+        self.out = nn.Identity()
+        
 
     def forward(self, x):
         # x: (B, N, C)
@@ -473,11 +743,14 @@ class EncoderUnit(nn.Module):
         # -------------------------
         if self.mamba_processor is not None and self.swin_processor is not None:
             fused_tokens = self.fusion([low_tokens, high_tokens])
+            fused_tokens = self.fusion_out(fused_tokens)
             # fused_tokens = low_tokens + high_tokens
         elif self.mamba_processor is not None:
             fused_tokens = low_tokens
         else:
             fused_tokens = high_tokens
+
+        fused_tokens = self.out(fused_tokens)
 
         return fused_tokens
 
@@ -543,10 +816,11 @@ class Interpolate(nn.Module):
 
 class SubNet(nn.Module):
     """Token融合/细化模块：多尺度token交互融合"""
-    def __init__(self, embed_dims=[96,192,384,768], mam_blocks=[6,6,6,6]):
+    def __init__(self, embed_dims=[96,192,384,768], mam_blocks=[6,6,6,6], use_rev=False):
         super().__init__()
         self.embed_dims = embed_dims
-        
+        self.use_rev=False
+
         self.upsample1 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=1, stride=1)
@@ -565,15 +839,15 @@ class SubNet(nn.Module):
         self.downsample2 = nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
         
         # 融合后的细化处理
-        self.refinement_blocks = nn.ModuleList()
+        self.mamba_blocks = nn.ModuleList()
         for i in range(len(embed_dims)):
-            self.refinement_blocks.append(nn.Sequential(
-                VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]], channel_first=True),
+            self.mamba_blocks.append(nn.Sequential(
+                # VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]], channel_first=True, drop_path_rate=0.05),
+                # Mamba2Blocks(dim=embed_dims[i], num_blocks=mam_blocks[i], channel_first=True, drop_path_rate=0.05),
+                Mamba2Blocks_Standard(d_model=embed_dims[i], n_layer=mam_blocks[i], d_intermediate=2*embed_dims[i], channel_first=True),
             ))
-        # for i in range(len(embed_dims)):
-        #     self.refinement_blocks.append(nn.Sequential(
-        #         nn.Identity(),
-        #     ))
+
+        
 
         alpha_init_value = 0.5  # 融合权重初始值
         channels = embed_dims
@@ -586,7 +860,15 @@ class SubNet(nn.Module):
         self.alpha3 = nn.Parameter(alpha_init_value * torch.ones((1, channels[3], 1, 1)),
                                    requires_grad=True) if alpha_init_value > 0 else None            
     
-    def forward(self, tokens_list):
+    def forward(self, tokens_list, use_eval=True):
+        # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
+
+        if self.use_rev:
+            return self._forward_reverse(tokens_list, use_eval=use_eval)
+        else:
+            return self._forward_noreverse(tokens_list)
+
+    def _forward_noreverse(self, tokens_list):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i)
 
         if tokens_list[0].ndim == 3:  # 3维张量
@@ -610,15 +892,43 @@ class SubNet(nn.Module):
         # print('Token shapes in TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
         # # (64 64) (64 64) (32 32) (16 16) (8 8)
 
-        f0 = f0*self.alpha0 + self.refinement_blocks[0](self.upsample1(f1)+x_emb)  
-        f1 = f1*self.alpha1 + self.refinement_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
-        f2 = f2*self.alpha2 + self.refinement_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
-        f3 = f3*self.alpha3 + self.refinement_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
+        f0 = f0*self.alpha0 + self.mamba_blocks[0](self.upsample1(f1)+x_emb)  
+        f1 = f1*self.alpha1 + self.mamba_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
+        f2 = f2*self.alpha2 + self.mamba_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
+        f3 = f3*self.alpha3 + self.mamba_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
         tokens_spatial_list = [x_emb,f0,f1,f2,f3]
 
         # print('Token shapes out TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
 
         return tokens_spatial_list  # (B, self.embed_dim, H_i, W_i)
+
+    def _forward_reverse(self, tokens_list, use_eval=False):
+        # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
+
+        if tokens_list[0].ndim == 3:  # 3维张量
+            for i, tokens in enumerate(tokens_list):
+                B, N, C = tokens.shape
+                H = W = int(math.sqrt(N))
+                tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+                # (B C H W)
+        else:
+            tokens_list = tokens_list
+            pass  # 已经是(B C H W)格式
+
+        x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
+
+        # 使用自定义可逆前向 Function
+        x_emb, y0, y1, y2, y3 = _SubNetRevFunction.apply(
+            self,
+            use_eval,
+            x_emb,
+            f0,
+            f1,
+            f2,
+            f3,
+        )
+
+        return [x_emb, y0, y1, y2, y3]  # (B, self.embed_dim, H_i, W_i)
     
 
     def _clamp_abs(self, data, value):
@@ -626,6 +936,204 @@ class SubNet(nn.Module):
             sign = data.sign() # ​​符号保留​​
             data.abs_().clamp_(value) # 将输入张量 data 的每个元素的绝对值限制在 [value, +∞) 范围内
             data *= sign    
+
+
+# ========================= Reversible-style forward for SubNet =========================
+class _SubNetRevFunction(torch.autograd.Function):
+    """
+    自定义可逆前向的 autograd Function：
+    - forward: 使用 SubNet 正常公式计算 y0..y3，并返回 [x_emb, y0, y1, y2, y3]
+    - backward: 重新执行一遍前向（带梯度），通过 torch.autograd.grad 同时得到对
+                输入 (x_emb, f0, f1, f2, f3) 和参数的梯度，参数梯度将累计到
+                subnet.parameters() 的 .grad 上，输入梯度作为返回值。
+
+    注意：这里的 backward 不是 in-place 反演，而是“重算前向”的 VJP，
+    类似 revnets 的实现思路，减少存图而保证梯度正确传播。
+    """
+
+    @staticmethod
+    def forward(ctx, subnet: nn.Module, use_eval: bool,
+                x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor, f3: torch.Tensor):
+        # 保存必要对象供 backward 使用
+        ctx.subnet = subnet
+        ctx.use_eval = use_eval
+        # 保存输入的轻量副本用于 backward 的重算（避免保存中间激活）
+        ctx.save_for_backward(x_emb.detach(), f0.detach(), f1.detach(), f2.detach(), f3.detach())
+
+        # 正常前向（不需要构建 autograd 图，后面会重算）
+        def _forward_once():
+            M0, M1, M2, M3 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2], subnet.mamba_blocks[3]
+            up1, up2, up3 = subnet.upsample1, subnet.upsample2, subnet.upsample3
+            dn0, dn1, dn2 = subnet.downsample0, subnet.downsample1, subnet.downsample2
+
+            a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
+            a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
+            a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
+            a3 = subnet.alpha3 if hasattr(subnet, 'alpha3') and subnet.alpha3 is not None else None
+
+            y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
+            y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
+            y2 = (f2 if a2 is None else f2 * a2) + M2(up3(f3) + dn1(y1))
+            y3 = (f3 if a3 is None else f3 * a3) + M3(dn2(y2))
+            return y0, y1, y2, y3
+
+        if use_eval:
+            # 临时切 eval，避免 Dropout/BN 造成不一致；这里 forward 不需要梯度
+            was = [m.training for m in subnet.mamba_blocks]
+            for m in subnet.mamba_blocks:
+                m.eval()
+            y0, y1, y2, y3 = _forward_once()
+            # 恢复状态
+            for m, t in zip(subnet.mamba_blocks, was):
+                m.train(t)
+        else:
+            y0, y1, y2, y3 = _forward_once()
+
+        return x_emb, y0, y1, y2, y3
+
+    @staticmethod
+    def backward(ctx, grad_x_emb: torch.Tensor, grad_y0: torch.Tensor, grad_y1: torch.Tensor, grad_y2: torch.Tensor, grad_y3: torch.Tensor):
+        subnet: nn.Module = ctx.subnet
+        use_eval: bool = ctx.use_eval
+        saved_x_emb, saved_f0, saved_f1, saved_f2, saved_f3 = ctx.saved_tensors
+
+        # 重新构造需要梯度的叶子张量
+        X = saved_x_emb.detach().requires_grad_(True)
+        F0 = saved_f0.detach().requires_grad_(True)
+        F1 = saved_f1.detach().requires_grad_(True)
+        F2 = saved_f2.detach().requires_grad_(True)
+        F3 = saved_f3.detach().requires_grad_(True)
+
+        # 收集需要梯度的参数
+        params = [p for p in subnet.parameters() if p.requires_grad]
+
+        # 为了重算一致性，必要时临时切换 eval/train 状态
+        was_states = []
+        if use_eval:
+            for m in subnet.mamba_blocks:
+                was_states.append(m.training)
+                m.eval()
+
+        with torch.enable_grad():
+            y0, y1, y2, y3 = _subnet_forward_formula(subnet, X, F0, F1, F2, F3)
+
+            # 计算对输入和参数的 VJP
+            outs = (X, y0, y1, y2, y3)
+            gout = (grad_x_emb, grad_y0, grad_y1, grad_y2, grad_y3)
+            grads = torch.autograd.grad(
+                outputs=outs,
+                inputs=[X, F0, F1, F2, F3] + params,
+                grad_outputs=gout,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )
+
+        # 恢复模块状态
+        if use_eval:
+            for m, t in zip(subnet.mamba_blocks, was_states):
+                m.train(t)
+
+        # 拆分输入与参数梯度
+        gX, gF0, gF1, gF2, gF3, *gparams = grads
+
+        # 将参数梯度累加到 .grad
+        for p, gp in zip(params, gparams):
+            if gp is None:
+                continue
+            if p.grad is None:
+                p.grad = gp.detach()
+            else:
+                p.grad.add_(gp.detach())
+
+        # 处理 None -> 0 的输入梯度
+        def _nz(g, ref):
+            return g if g is not None else torch.zeros_like(ref)
+
+        gX = _nz(gX, X)
+        gF0 = _nz(gF0, F0)
+        gF1 = _nz(gF1, F1)
+        gF2 = _nz(gF2, F2)
+        gF3 = _nz(gF3, F3)
+
+        # 对应 forward 的参数顺序：subnet, use_eval, x_emb, f0, f1, f2, f3
+        return (None,        # subnet
+                None,        # use_eval
+                gX,
+                gF0,
+                gF1,
+                gF2,
+                gF3)
+
+
+def _subnet_forward_reverse_call(subnet: nn.Module, x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor, f3: torch.Tensor,
+                                 use_eval: bool = True):
+    """包装调用 _SubNetRevFunction，实现类似 .apply(local_funs, alpha, *args) 的接口。"""
+    return _SubNetRevFunction.apply(subnet, use_eval, x_emb, f0, f1, f2, f3)
+
+
+def _maybe_tokens_to_spatial(tokens_list):
+    # 将 (B, N, C) 列表转为 (B, C, H, W)
+    if tokens_list[0].ndim == 3:
+        out = []
+        for tokens in tokens_list:
+            B, N, C = tokens.shape
+            H = W = int(math.sqrt(N))
+            out.append(tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous())
+        return out
+    return tokens_list
+
+
+def _maybe_spatial_to_tokens(tokens_list):
+    # 将 (B, C, H, W) 列表转回 (B, N, C)
+    if tokens_list[0].ndim == 4:
+        out = []
+        for feat in tokens_list:
+            B, C, H, W = feat.shape
+            out.append(feat.permute(0, 2, 3, 1).contiguous().view(B, H * W, C))
+        return out
+    return tokens_list
+
+
+def _split_tokens_list(tokens_list):
+    # 统一解包
+    if len(tokens_list) != 5:
+        raise ValueError("tokens_list must be length 5: [x_emb,f0,f1,f2,f3]")
+    return tokens_list[0], tokens_list[1], tokens_list[2], tokens_list[3], tokens_list[4]
+
+
+def _pack_tokens_list(x_emb, y0, y1, y2, y3):
+    return [x_emb, y0, y1, y2, y3]
+
+
+def _subnet_forward_formula(subnet: nn.Module, x_emb, f0, f1, f2, f3):
+    M0, M1, M2, M3 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2], subnet.mamba_blocks[3]
+    up1, up2, up3 = subnet.upsample1, subnet.upsample2, subnet.upsample3
+    dn0, dn1, dn2 = subnet.downsample0, subnet.downsample1, subnet.downsample2
+    a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
+    a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
+    a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
+    a3 = subnet.alpha3 if hasattr(subnet, 'alpha3') and subnet.alpha3 is not None else None
+    y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
+    y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
+    y2 = (f2 if a2 is None else f2 * a2) + M2(up3(f3) + dn1(y1))
+    y3 = (f3 if a3 is None else f3 * a3) + M3(dn2(y2))
+    return y0, y1, y2, y3
+
+
+# 给 SubNet 增加一个可逆式前向的 API（不破坏原 forward）
+def _subnet_forward_reverse(self: SubNet, tokens_list, *, use_eval: bool = True):
+    # 统一到 (B,C,H,W)
+    spatials = _maybe_tokens_to_spatial(tokens_list)
+    x_emb, f0, f1, f2, f3 = _split_tokens_list(spatials)
+    x_emb2, y0, y1, y2, y3 = _subnet_forward_reverse_call(self, x_emb, f0, f1, f2, f3, use_eval=use_eval)
+    out_spatials = _pack_tokens_list(x_emb2, y0, y1, y2, y3)
+    # 返回与输入同格式
+    return _maybe_spatial_to_tokens(out_spatials)
+
+
+# 将方法绑定到类
+setattr(SubNet, 'forward_reverse', _subnet_forward_reverse)
 
 
 
@@ -685,9 +1193,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[1]//2),            
         )
         self.convblock01 = nn.Sequential(
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 4*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )        
 
 
@@ -698,9 +1206,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[2]//2),
         )
         self.convblock12 = nn.Sequential(
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 4*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )
         
 
@@ -711,9 +1219,9 @@ class UnifiedTokenDecoder(nn.Module):
             nn.InstanceNorm2d(embed_dims[3]//2),            
         )
         self.convblock23 = nn.Sequential(
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 4*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
             )
         
 

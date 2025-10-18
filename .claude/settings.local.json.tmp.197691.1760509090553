@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /home/gzm/gzm-MTRRNetv2/debug)",
+      "Bash(/home/gzm/cp310pt26/bin/python debug/test_gradient_flow.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python debug/test_mamba_gradient.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python debug/test_fusion_gradient.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python debug/test_aaf_modified.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python debug/aaf_fixed_versions.py)",
+      "Read(//home/gzm/cp310pt26/lib/python3.10/site-packages/mamba_ssm/ops/triton/**)",
+      "Bash(python -c \"import causal_conv1d_cuda; help(causal_conv1d_cuda.causal_conv1d_bwd)\")",
+      "Bash(/home/gzm/cp310pt26/bin/python -c \"import causal_conv1d_cuda; print(causal_conv1d_cuda.causal_conv1d_bwd.__doc__)\")",
+      "Read(//home/gzm/cp310pt26/lib/python3.10/site-packages/mamba_ssm/**)",
+      "Bash(/home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/debug/test_mamba_backward.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/debug_mamba_internals.py)",
+      "Bash(/home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/debug_train.py)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

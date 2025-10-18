@@ -367,16 +367,10 @@ class MTRRNet(nn.Module):
     多尺度编码 → Token融合 → 统一解码
     频带分工：低频→Mamba，高频→Swin
     """
-    def __init__(self, use_legacy=False):
+    def __init__(self):
         super().__init__()
-        self.use_legacy = use_legacy
         
-        if use_legacy:
-            # 使用旧实现的组件
-            self._init_legacy()
-        else:
-            # 新Token-only实现
-            self._init_token_only()
+        self._init_token_only()
         
     def _init_token_only(self):
         """初始化Token-only版本的组件"""
@@ -396,42 +390,48 @@ class MTRRNet(nn.Module):
             drop_branch_prob=0.2
         )
         
+
         # Token SubNet：多尺度token融合
         self.token_subnet1 = SubNet(
             embed_dims=[96,192,384,768],         # 融合后的token维度
-            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
-            # mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
+            mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
+            # mam_blocks=[3, 3, 3, 3],           # 融合细化的block数
+            use_rev=True
         )
-        self.token_subnet2 = SubNet(
-            embed_dims=[96,192,384,768],         # 融合后的token维度
-            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
-            # mam_blocks=[3, 3, 3, 3]           # 融合细化的block数
-        )
-        self.token_subnet3 = SubNet(
-            embed_dims=[96,192,384,768],         # 融合后的token维度
-            mam_blocks=[6, 6, 6, 6]           # 融合细化的block数
-        )
-
-        # 统一Token解码器
-        self.token_decoder = UnifiedTokenDecoder(
+        self.token_decoder1 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
             base_scale_init=0.3    # base缩放因子初始值
         )
 
 
-        
+        self.token_subnet2 = SubNet(
+            embed_dims=[96,192,384,768],         # 融合后的token维度
+            mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
+            # mam_blocks=[3, 3, 3, 3],           # 融合细化的block数
+            use_rev=True
+        )
+        self.token_decoder2 = UnifiedTokenDecoder(
+            embed_dims=[96,192,384,768],         # 输入token维度
+            base_scale_init=0.3    # base缩放因子初始值
+        )
+
+
+        self.token_subnet3 = SubNet(
+            embed_dims=[96,192,384,768],         # 融合后的token维度
+            mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
+            use_rev=True
+        )
+        self.token_decoder3 = UnifiedTokenDecoder(
+            embed_dims=[96,192,384,768],         # 输入token维度
+            base_scale_init=0.3    # base缩放因子初始值
+        )
+
+
+
+
+    
+    
     def forward(self, x_in):
-        """
-        输入: x_in (B, 3, 256, 256)
-        输出: (rmap, out) 其中out为6通道(T,R)
-        """
-        if self.use_legacy:
-            return self._forward_legacy(x_in)
-        else:
-            return self._forward_token_only(x_in)
-    
-    
-    def _forward_token_only(self, x_in):
         """Token-only版本的前向传播"""
         
         
@@ -446,14 +446,17 @@ class MTRRNet(nn.Module):
         # fused_tokens = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
         tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        out1 = self.token_decoder1(tokens_list, x_in)  # (B, 6, 256, 256)
+
         tokens_list = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        fused_tokens = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        out2 = self.token_decoder2(tokens_list, x_in)  # (B, 6, 256, 256)
 
+        tokens_list = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
+        out3 = self.token_decoder3(tokens_list, x_in)  # (B, 6, 256, 256)
 
-        # 4. 统一解码：token → 6通道(T,R)
-        out = self.token_decoder(fused_tokens, x_in)  # (B, 6, 256, 256)
+        outs = [out1,out2,out3]
         
-        return out
+        return outs
 
 
     
@@ -466,7 +469,9 @@ class MTRREngine(nn.Module):
         super(MTRREngine, self).__init__()
         self.device = device 
         self.opts  = opts
-        self.visual_names = ['fake_T', 'fake_R', 'c_map', 'I', 'Ic', 'T', 'R']
+        self.visual_names = ['fake_Ts', 'fake_Rs', 'c_map', 'I', 'Ic', 'T', 'R']
+        self.fake_Ts = [None]*3  # 存储三个尺度的去反射图
+        self.fake_Rs = [None]*3  # 存储三个尺度的反射图
         self.netG_T = MTRRNet().to(device)  
         self.net_c = net_c  
 
@@ -487,17 +492,9 @@ class MTRREngine(nn.Module):
             self.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()},strict=True)
 
             if 'optimizer_state_dict' in model_state:
-                try:
-                    optimizer.load_state_dict(model_state['optimizer_state_dict'])
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = model_state.get('lr', param_group['lr'])
-                except ValueError as e:
-                    print(f"Warning: Could not load optimizer state due to: {e}")
-                    print("Continuing with fresh optimizer state")
-                    # 只设置学习率，不加载整个state
-                    if 'lr' in model_state:
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] = model_state['lr']
+                optimizer.load_state_dict(model_state['optimizer_state_dict'])
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = model_state.get('lr', param_group['lr'])
 
             if 'scheduler_state_dict' in model_state:
                 scheduler.load_state_dict(model_state['scheduler_state_dict'])
@@ -554,8 +551,14 @@ class MTRREngine(nn.Module):
         self.Ic = self.I  # 直接设置为原始输入
         
         # 使用原始输入调用token-only模型
-        self.out = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
-        self.fake_T, self.fake_R = self.out[:,0:3,:,:],self.out[:,3:6,:,:]
+        self.outs = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
+        
+        for i in range(0,len(self.outs)):
+            self.fake_Ts[i] = self.outs[i][:,0:3,:,:] 
+
+        for i in range(0,len(self.outs)):
+            self.fake_Rs[i] = self.outs[i][:,3:6,:,:] 
+        
 
         self.c_map = torch.zeros_like(self.I) # 不要rdm了
 
@@ -563,7 +566,7 @@ class MTRREngine(nn.Module):
         
  
     def monitor_layer_stats(self):
-        """仅监控模型的一级子模块（不深入嵌套结构）"""
+        """监控模型所有层，包括 Mamba2 内部子模块"""
         hooks = []
         model = self.netG_T
 
@@ -572,22 +575,52 @@ class MTRREngine(nn.Module):
             if isinstance(output, torch.Tensor):
                 mean = output.mean().item()
                 std = output.std().item()
+                min_val = output.min().item()
+                max_val = output.max().item()
+                median = output.median().item()
+                l2_norm = torch.norm(output).item()
 
                 is_nan = math.isnan(mean) or math.isnan(std)
                 if is_nan or self.opts.always_print:
-                    msg = f"{layer_name:<100} | Mean: {mean:>15.6f} | Std: {std:>15.6f} | Shape: {tuple(output.shape)}"
+                    msg = (f"{layer_name:<100} | {mean:>12.6e} | {std:>12.6e} | {min_val:>12.6e} | "
+                           f"{max_val:>12.6e} | {median:>12.6e} | {l2_norm:>12.6e} | {tuple(output.shape)}")
                     # print(msg)
                     with open('./debug/state.log', 'a') as f:
-                        f.write(msg + '\n')# 修正钩子函数参数（正确接收module, input, output）
-      
+                        f.write(msg + '\n')
+
+        # 导入 Mamba2 用于类型检查
+        try:
+            from mamba_ssm.modules.mamba2 import Mamba2
+            has_mamba2 = True
+        except ImportError:
+            has_mamba2 = False
 
         # 遍历所有子模块并注册钩子
+        mamba2_internal_count = 0
         for name, module in model.named_modules():
-            if not isinstance(module, nn.ModuleList):  # 过滤容器类（如Sequential）
-                hook = module.register_forward_hook(
-                    lambda m, inp, out, name=name: _hook_fn(m, inp, out, name)
-                )
-                hooks.append(hook)   
+            # 跳过容器类
+            if isinstance(module, (nn.ModuleList, nn.Sequential)):
+                continue
+
+            # 为所有模块注册钩子
+            hook = module.register_forward_hook(
+                lambda m, inp, out, name=name: _hook_fn(m, inp, out, name)
+            )
+            hooks.append(hook)
+
+            # 特别处理 Mamba2：额外为其内部子模块注册钩子
+            if has_mamba2 and isinstance(module, Mamba2):
+                for sub_name in ['in_proj', 'conv1d', 'act', 'norm', 'out_proj']:
+                    if hasattr(module, sub_name):
+                        sub_module = getattr(module, sub_name)
+                        sub_hook = sub_module.register_forward_hook(
+                            lambda m, inp, out, fn=f"{name}.{sub_name}": _hook_fn(m, inp, out, fn)
+                        )
+                        hooks.append(sub_hook)
+                        mamba2_internal_count += 1
+
+        if mamba2_internal_count > 0:
+            print(f"[Monitor] Registered {mamba2_internal_count} Mamba2 internal hooks")   
         
 
 

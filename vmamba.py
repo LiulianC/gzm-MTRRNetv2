@@ -1540,7 +1540,10 @@ class SS2Dv2:
 
 
         # x proj ============================
+        # self.d_inner = 2*96   self.k_group = 4      self.dt_rank = 96/16     self.d_state = 16 
         self.x_proj = Linear(self.d_inner, self.k_group * (self.dt_rank + self.d_state * 2), groups=self.k_group, bias=False, channel_first=True)
+
+        # self.dt_rank = 96/16  self.k_group * self.d_inner = 4 * 2*96
         self.dt_projs = Linear(self.dt_rank, self.k_group * self.d_inner, groups=self.k_group, bias=False, channel_first=True)
           
         # self.x_proj = [
@@ -1559,6 +1562,11 @@ class SS2Dv2:
             self.A_logs, self.Ds, self.dt_projs_weight, self.dt_projs_bias = mamba_init.init_dt_A_D(
                 self.d_state, self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor, k_group=self.k_group,
             )
+            # init_dt_A_D 的作用是初始化以下四个参数：
+            # A_logs —— 动态矩阵 A 的 log 参数；
+            # Ds —— 动态系统的对角项 D
+            # dt_projs_weight —— 对时间步（Δt）投影层的权重；
+            # dt_projs_bias —— 对时间步（Δt）投影层的偏置。
         elif initialize in ["v1"]:
             # simple init dt_projs, A_logs, Ds
             self.Ds = nn.Parameter(torch.ones((self.k_group * self.d_inner)))
@@ -1575,6 +1583,24 @@ class SS2Dv2:
         # self.dt_projs.bias.data = self.dt_projs_bias.data.view(self.dt_projs.bias.shape)
         del self.dt_projs_weight
         # del self.dt_projs_bias
+
+        # debugging hooks ==============================
+
+        # 四向序列生成
+        self.x_viewer = nn.Identity()
+        self.xs_viewer = nn.Identity()
+
+        # 参数准备
+        self.dts_viewer = nn.Identity()
+        self.As_viewer = nn.Identity()
+        self.Ds_viewer = nn.Identity()
+        self.Bs_viewer = nn.Identity()
+        self.Cs_viewer = nn.Identity()
+        self.delta_bias_viewer = nn.Identity()
+
+        # 输出
+        self.ys_viewer = nn.Identity()
+        self.y_viewer = nn.Identity()
 
     def forward_corev2(
         self,
@@ -1609,8 +1635,8 @@ class SS2Dv2:
             # 如果输入是 channel_last (B, H, W, C)，转为 (B, C, H, W)
 
         B, D, H, W = x.shape # 批大小、通道数、高度、宽度
-        N = self.d_state  # 状态维度（SSM 隐状态维数）
-        K, D, R = self.k_group, self.d_inner, self.dt_rank 
+        N = self.d_state  # 状态维度（SSM 隐状态维数） 
+        K, D, R = self.k_group, self.d_inner, self.dt_rank  # N = self.d_state=16 K=4 D=4 d_inner = int(ssm_ratio 2 * d_model 96) # 192    R=self.dt_rank = int(math.ceil(self.d_model 96 / 16) if dt_rank == "auto" else dt_rank)
         # K: 分组数，D: 内部通道数，R: 时间步 rank
         L = H * W # 展开后的序列长度
 
@@ -1619,37 +1645,57 @@ class SS2Dv2:
             return selective_scan_fn(u, delta, A, B, C, D, delta_bias, delta_softplus, ssoflex, backend=selective_scan_backend)
         
         if True:
+            x = self.x_viewer(x)
             # 1️⃣ 多方向扫描（cross/bi-direction）
             xs = cross_scan_fn(x, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch) 
             # (B, C, H, W) → (B, 4, C, L) 不同方向的扫描序列
-            
-            # print('xs:', xs.mean().item(), xs.std().item(), xs.shape)        # 期望非零
-            # print('xs_flat:', xs.view(B, -1, L).mean().item(),
-            #                 xs.view(B, -1, L).std().item())
+            xs = self.xs_viewer(xs)
 
             # 2️⃣ 把 cross_scan_fn 得到的 (B, 4, D, L) 做投影，拆分出后续 SSM（Mamba 部分）需要的参数
-            x_dbl = self.x_proj(xs.view(B, -1, L)) 
-            # (B, K*D, L) → (B, K*(R+N+N), L)
+            # self.d_inner = 2*96  --> self.k_group = 4   *  （  self.dt_rank = 96/16   +  self.d_state = 16  + self.d_state = 16）
+            x_dbl = self.x_proj(xs.view(B, -1, L))
 
-            # 3️⃣ 按维度拆分
+            # R=self.dt_rank = int(math.ceil(self.d_model 96 / 16) if dt_rank == "auto" else dt_rank)   6
+            # N = self.d_state=16 
+            # K=4 
+            # D=d_inner = int(ssm_ratio 2 * d_model 96) # 192    
+
+            # 3️⃣ 按维度拆分 (B, K*D, L) → (B, K*(R+N+N), L)
             dts, Bs, Cs = torch.split(x_dbl.view(B, K, -1, L), [R, N, N], dim=2)
             # dts: (B, K, R, L)，Bs: (B, K, N, L)，Cs: (B, K, N, L)
 
-            # self.x_proj 先生成一个低秩的 Δt 表示 (B, K, R, L)
+            # self.x_proj 先生成一个低秩的 Δt dtb (B, K, R, L)
+
             # self.dt_projs 再把它投影成和输入特征同维度的 Δt (B, K, D_inner, L)
-            dts = dts.contiguous().view(B, -1, L) # (B, K*R, L)
-            dts = self.dt_projs(dts) # 投影 dts，保持 (B, K*R, L)
+            dts = dts.contiguous().view(B, -1, L) # (B, K*R=24, L)
+            
+            # self.dt_rank --->  self.k_group * self.d_inner
+            dts = self.dt_projs(dts) # 投影 dts，(B, K*R, L) --> (B, K*D, L)
+
 
             # 4️⃣ xs 和 dts 调整形状
             xs = xs.view(B, -1, L) # (B, K*D, L)
-            dts = dts.contiguous().view(B, -1, L) # (B, K*R, L)
+            xs = self.xs_viewer(xs)
 
-            # 5️⃣ 预计算常量参数
+            dts = dts.contiguous().view(B, -1, L) # (B, K*D, L)
+            dts = self.dts_viewer(dts)
+
+            # 5️⃣ 预计算常量参数 
+            # A_logs Ds 最终是执行v0初始化
             As = -self.A_logs.to(torch.float).exp() # (K*C, d_state)
-            Ds = self.Ds.to(torch.float) # (K*C)
+            Ds = self.Ds.to(torch.float) # (K*C) # 对角修正
             Bs = Bs.contiguous().view(B, K, N, L) # (B, K, N, L)
             Cs = Cs.contiguous().view(B, K, N, L) # (B, K, N, L)
             delta_bias = self.dt_projs_bias.view(-1).to(torch.float) # (K*R)
+
+            # 这些是学习到的背后权重
+            As = self.As_viewer(As)
+            Ds = self.Ds_viewer(Ds)
+            delta_bias = self.delta_bias_viewer(delta_bias)
+
+            # 这些是根据每次输入动态生成的
+            Bs = self.Bs_viewer(Bs)
+            Cs = self.Cs_viewer(Cs)
 
             # 6️⃣ 强制转 fp32（如果需要）
             if force_fp32:
@@ -1660,12 +1706,13 @@ class SS2Dv2:
                 xs, dts, As, Bs, Cs, Ds, delta_bias, delta_softplus
             ).view(B, K, -1, H, W) 
             # 输出 (B, K, D_out, H, W)
-            # print('mamba out shape',ys.shape)  ([16, 4, 192, 64, 64])
+            ys = self.ys_viewer(ys)
 
             # 8️⃣ 多方向结果 merge 回原通道
             y: torch.Tensor = cross_merge_fn(ys, in_channel_first=True, out_channel_first=True, scans=_scan_mode, force_torch=scan_force_torch)
             # (B, K, D_out, H, W) → (B, D_out, H* W) 
             # print('mamba merge out shape',y.shape)  ([16, 192, 4096]) 
+            y = self.y_viewer(y)
 
             # 9️⃣ Debug 信息保存
             if getattr(self, "__DEBUG__", False):
