@@ -31,6 +31,8 @@ parser.add_argument('--model_dir', type=str, default='./model', help='the model 
 parser.add_argument('--save_dir', type=str, default='./results', help='the results saving dir')
 parser.add_argument("--host", type=bool, default="127.0.0.1")
 parser.add_argument("--port", default=57117)
+# 降噪节流（可选）：每次参数更新后休眠毫秒数，降低平均功耗与风扇噪音；不影响训练数值结果
+parser.add_argument('--throttle_ms', type=int, default=0, help='sleep milliseconds after each optimizer.step(); 0 to disable')
 opts = parser.parse_args()
 opts.batch_size = 4
 opts.shuffle = True
@@ -45,14 +47,16 @@ opts.debug_monitor_layer_grad = 1 # # debug模式开启时 epoch和size都要为
 opts.epoch = 300
 opts.sampler_size1 = 0
 opts.sampler_size2 = 0
-opts.sampler_size3 = 800
+opts.sampler_size3 = 8
 opts.sampler_size4 = 0
-opts.sampler_size5 = 1200
-opts.test_size = [200,0,0,0,200,0]
+opts.sampler_size5 = 12
+opts.test_size = [200,0,0,0,200,200]
 opts.model_path='./model_fit/model_latest.pth'  
-opts.model_path=None  #如果要load就注释我
-# opts.scheduler_type = 'plateau'  # 'plateau' or 'cosine'
-opts.scheduler_type = 'cosine'  # 'plateau' or 'cosine'
+opts.model_path='./model_fit/model_best_29.pth'  
+# opts.model_path=None  #如果要load就注释我
+
+opts.scheduler_type = 'plateau'  # 'plateau' or 'cosine'
+# opts.scheduler_type = 'cosine'  # 'plateau' or 'cosine'
 
 # current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
  
@@ -89,7 +93,7 @@ tissue_gen = '/home/gzm/gzm-MTRRVideo/data/tissue_gen'
 tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVideo/data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
 tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True)
+tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True, color_match=True)
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
@@ -97,7 +101,7 @@ VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=opts.sampler_size4, enab
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=True, color_jitter=True)
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=True, color_jitter=False)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -106,7 +110,7 @@ train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_siz
 
 
 test_data_dir1 = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], SamplerSize=False)
+test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], SamplerSize=False, color_match=True)
 
 test_data_dir2 = '/home/gzm/gzm-MTRRVideo/data/hyperK_000'
 test_data2 = TestDataset(datadir=test_data_dir2, fns='/home/gzm/gzm-MTRRVideo/data/hyperK_000_list.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[1])
@@ -172,59 +176,32 @@ if __name__ == '__main__':
 
     # 模块名称到学习率的映射
     LearnRate = 1e-4
+    
     lr_map = {
         'token_encoder.patchembed': 1e-4,
-        'token_encoder.encoder_unit0': 1e-4,
-        'token_encoder.encoder_unit1': 1e-4,
-        'token_encoder.encoder_unit2': 1e-4,    
+        'token_encoder.encoder_unit0': 5e-3,
+        'token_encoder.encoder_unit1': 1e-3,
+        'token_encoder.encoder_unit2': 5e-4,    
         'token_encoder.encoder_unit3': 1e-4,
         'token_subnet1': 1e-4,
         'token_subnet2': 1e-4,
         'token_subnet3': 1e-4,
 
-        'token_encoder.encoder_unit0.mamba_processor': 2e-3,
-        'token_encoder.encoder_unit1.mamba_processor': 1e-3,
-        'token_encoder.encoder_unit2.mamba_processor': 9e-4,
-        'token_encoder.encoder_unit3.mamba_processor': 8e-4,
+        # 'token_encoder.encoder_unit0.mamba_processor': 2e-3,
+        # 'token_encoder.encoder_unit1.mamba_processor': 1e-3,
+        # 'token_encoder.encoder_unit2.mamba_processor': 9e-4,
+        # 'token_encoder.encoder_unit3.mamba_processor': 8e-4,
 
-        'token_subnet1.mamba_blocks.1': 5e-3,
         'token_subnet1.mamba_blocks.2': 5e-3,
+        'token_subnet1.mamba_blocks.3': 5e-3,
 
-        'token_subnet2.mamba_blocks.1': 5e-3,
         'token_subnet2.mamba_blocks.2': 5e-3,
+        'token_subnet2.mamba_blocks.3': 5e-3,
         
-        'token_subnet3.mamba_blocks.1': 5e-3,
         'token_subnet3.mamba_blocks.2': 5e-3,
-
-        'token_decoder1.upsample1': 5e-3,
-        'token_decoder1.upsample2': 5e-3,
-        'token_decoder1.upsample3': 5e-3,
-
-        'token_decoder2.upsample1': 5e-3,
-        'token_decoder2.upsample2': 5e-3,
-        'token_decoder2.upsample3': 5e-3,
-
-        'token_decoder3.upsample1': 5e-3,
-        'token_decoder3.upsample2': 5e-3,
-        'token_decoder3.upsample3': 5e-3,
-
-        'token_decoder1.convblock01': 1e-4,
-        'token_decoder1.convblock12': 1e-4,
-        'token_decoder1.convblock23': 1e-4,
-        
-        'token_decoder2.convblock01': 1e-4,
-        'token_decoder2.convblock12': 1e-4,
-        'token_decoder2.convblock23': 1e-4,
-        
-        'token_decoder3.convblock01': 1e-4,
-        'token_decoder3.convblock12': 1e-4,
-        'token_decoder3.convblock23': 1e-4,
-
-        'token_decoder1.decoder': 5e-3,
-        'token_decoder2.decoder': 5e-3,
-        'token_decoder3.decoder': 5e-3,
-
+        'token_subnet3.mamba_blocks.3': 5e-3,
     }
+ 
 
     # 为每个模块分别收集参数
     module_params = {k: {'decay': [], 'no_decay': []} for k in lr_map.keys()}
@@ -303,7 +280,7 @@ if __name__ == '__main__':
             patience=5,           # 等待 5 个 epoch 没有 improvement 后才触发 LR 衰减
             threshold=1e-4,       # 可选：认为 loss 没有显著下降的阈值
             threshold_mode='rel', # 使用相对阈值
-            cooldown=0,           # 每次衰减后冷却期（可不设）
+            cooldown=1,           # 每次衰减后冷却期（可不设）
             min_lr=1e-8,          # 学习率下限
             eps=1e-8              # 学习率更新的最小变化
         )
@@ -320,7 +297,7 @@ if __name__ == '__main__':
 
 
     # 定义早停
-    early_stopping = EarlyStopping(patience=50, delta=1e-4, verbose=True)
+    early_stopping = EarlyStopping(patience=20, delta=1e-4, verbose=True)
 
     # 网络load 以及继承上次的epoch和学习参数
     if opts.model_path is not None and os.path.exists(opts.model_path):
@@ -402,13 +379,14 @@ if __name__ == '__main__':
 
             _, _, _, _, _, all_loss0 = loss_function(train_fake_Ts[0], train_label1, train_ipt, train_rcmaps, train_fake_Rs[0], train_label2)
             _, _, _, _, _, all_loss1 = loss_function(train_fake_Ts[1], train_label1, train_ipt, train_rcmaps, train_fake_Rs[1], train_label2)
-            loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss2 = loss_function(train_fake_Ts[2], train_label1, train_ipt, train_rcmaps, train_fake_Rs[2], train_label2)
+            _, _, _, _, _, all_loss2 = loss_function(train_fake_Ts[2], train_label1, train_ipt, train_rcmaps, train_fake_Rs[2], train_label2)
+            loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss3 = loss_function(train_fake_Ts[3], train_label1, train_ipt, train_rcmaps, train_fake_Rs[3], train_label2)
 
             # all_loss0, _ = PSD_LossFunc.compute_total(train_fake_Rs[0], train_label1)
             # all_loss1, _ = PSD_LossFunc.compute_total(train_fake_Rs[1], train_label1)
             # all_loss2, loss_table = PSD_LossFunc.compute_total(train_fake_Rs[2], train_label1)
    
-            all_loss = 0.5*all_loss0 + 0.5*all_loss1 + 1.5*all_loss2
+            all_loss = 0.5*all_loss0 + 0.5*all_loss1 + 0.5*all_loss2 + 1.0*all_loss3
 
             total_train_loss +=all_loss.item()
             if torch.isnan(all_loss2):
@@ -437,6 +415,11 @@ if __name__ == '__main__':
             # scaler.step(optimizer)
             # scaler.update()            
             optimizer.step()
+            # 可选：同步并短暂休眠，降低平均 GPU 利用率与风扇噪声（不改变训练效果）
+            if getattr(opts, 'throttle_ms', 0) > 0:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                time.sleep(opts.throttle_ms / 1000.0)
 
             
             total_train_step += 1

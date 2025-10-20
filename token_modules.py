@@ -819,24 +819,43 @@ class SubNet(nn.Module):
     def __init__(self, embed_dims=[96,192,384,768], mam_blocks=[6,6,6,6], use_rev=False):
         super().__init__()
         self.embed_dims = embed_dims
-        self.use_rev=False
+        # 是否启用可逆式前向（重算反传）
+        self.use_rev = bool(use_rev)
 
         self.upsample1 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=1, stride=1)
+            nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[1]//2, affine=True),
+            nn.GELU(),
         )
         self.upsample2 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[2], embed_dims[2]//2, kernel_size=1, stride=1)
+            nn.Conv2d(embed_dims[2], embed_dims[2]//2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[2]//2, affine=True),
+            nn.GELU(),
         )
         self.upsample3 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=1, stride=1)
+            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[3]//2, affine=True),
+            nn.GELU(),
         )
         
-        self.downsample0 = nn.Conv2d(embed_dims[0], embed_dims[0]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
-        self.downsample1 = nn.Conv2d(embed_dims[1], embed_dims[1]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
-        self.downsample2 = nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, padding_mode='reflect', bias=False)# 不重叠下采样
+        self.downsample0 = nn.Sequential(
+            nn.Conv2d(embed_dims[0], embed_dims[0]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
+            nn.InstanceNorm2d(embed_dims[0]*2, affine=True),
+            nn.GELU(),
+        )
+        self.downsample1 = nn.Sequential(
+            nn.Conv2d(embed_dims[1], embed_dims[1]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
+            nn.InstanceNorm2d(embed_dims[1]*2, affine=True),
+            nn.GELU(),
+        )
+        self.downsample2 = nn.Sequential(
+            nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
+            nn.InstanceNorm2d(embed_dims[2]*2, affine=True),
+            nn.GELU(),
+        )
         
         # 融合后的细化处理
         self.mamba_blocks = nn.ModuleList()
@@ -902,7 +921,7 @@ class SubNet(nn.Module):
 
         return tokens_spatial_list  # (B, self.embed_dim, H_i, W_i)
 
-    def _forward_reverse(self, tokens_list, use_eval=False):
+    def _forward_reverse(self, tokens_list, use_eval=True):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
 
         if tokens_list[0].ndim == 3:  # 3维张量
@@ -1156,9 +1175,9 @@ class ConvNextBlock(nn.Module):
         # 层归一化（channels_last 模式）
         self.norm = nn.LayerNorm(in_channel, eps=1e-6)
         # 1x1卷积（通过线性层实现）
-        self.pwconv1 = nn.Linear(in_channel, hidden_dim) # 升维# pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(in_channel, hidden_dim, bias=False) # 升维# pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(hidden_dim, out_channel)# 降维
+        self.pwconv2 = nn.Linear(hidden_dim, out_channel, bias=False)# 降维
         # 层缩放参数 类似 Transformer 的 ​​可学习缩放因子​​，调整各通道的重要性
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((out_channel)), 
                                     requires_grad=True) if layer_scale_init_value > 0 else None
@@ -1188,9 +1207,14 @@ class UnifiedTokenDecoder(nn.Module):
         
         self.upsample1 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[1], embed_dims[1]//2, kernel_size=1, stride=1),
-            nn.Conv2d(embed_dims[1]//2,embed_dims[1]//2,1,1),
-            nn.InstanceNorm2d(embed_dims[1]//2),            
+            # 1x1 Conv，去掉 bias
+            nn.Conv2d(embed_dims[1], embed_dims[1] // 2, kernel_size=1, stride=1, bias=False),
+            nn.InstanceNorm2d(embed_dims[1] // 2, affine=True),  # 给IN加可学习仿射参数
+            nn.GELU(),
+
+            nn.Conv2d(embed_dims[1] // 2, embed_dims[1] // 2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[1] // 2, affine=True),
+            nn.GELU(),          
         )
         self.convblock01 = nn.Sequential(
             ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
@@ -1201,9 +1225,14 @@ class UnifiedTokenDecoder(nn.Module):
 
         self.upsample2 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[2], embed_dims[2]//2, kernel_size=1, stride=1),
-            nn.Conv2d(embed_dims[2]//2,embed_dims[2]//2,1,1),
-            nn.InstanceNorm2d(embed_dims[2]//2),
+            # 1x1 Conv，去掉 bias
+            nn.Conv2d(embed_dims[2], embed_dims[2] // 2, kernel_size=1, stride=1, bias=False),
+            nn.InstanceNorm2d(embed_dims[2] // 2, affine=True),  # 给IN加可学习仿射参数
+            nn.GELU(),
+
+            nn.Conv2d(embed_dims[2] // 2, embed_dims[2] // 2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[2] // 2, affine=True),
+            nn.GELU(),   
         )
         self.convblock12 = nn.Sequential(
             ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
@@ -1214,9 +1243,14 @@ class UnifiedTokenDecoder(nn.Module):
 
         self.upsample3 = nn.Sequential(
             Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=1, stride=1),
-            nn.Conv2d(embed_dims[3]//2,embed_dims[3]//2,1,1),
-            nn.InstanceNorm2d(embed_dims[3]//2),            
+            # 1x1 Conv，去掉 bias
+            nn.Conv2d(embed_dims[3], embed_dims[3] // 2, kernel_size=1, stride=1, bias=False),
+            nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),  # 给IN加可学习仿射参数
+            nn.GELU(),
+
+            nn.Conv2d(embed_dims[3] // 2, embed_dims[3] // 2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+            nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),
+            nn.GELU(),             
         )
         self.convblock23 = nn.Sequential(
             ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
@@ -1232,23 +1266,38 @@ class UnifiedTokenDecoder(nn.Module):
         # 上采样和卷积解码层
         self.decoder = nn.Sequential(
             # 64x64 -> 128x128
-            nn.ConvTranspose2d(96, 96, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(96),
-            
-            # 128x128 -> 256x256  
-            nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(64),
-            
-            # 最终输出层
-            nn.Conv2d(64, 32, kernel_size=3, padding=1, padding_mode='reflect'),
-            nn.InstanceNorm2d(32),
-            nn.Conv2d(32, 6, kernel_size=1)  # 6通道输出 (T, R)
+            nn.ConvTranspose2d(96, 96, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(96, affine=True),
+            nn.GELU(),
+
+            # 128x128 -> 256x256
+            nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(64, affine=True),
+            nn.GELU(),
+
+            # 特征细化
+            nn.Conv2d(64, 32, kernel_size=3, padding=1, padding_mode='reflect', bias=False),
+            nn.InstanceNorm2d(32, affine=True),
+            nn.GELU(),
+
+            # 最终输出层（后面没有归一化，bias 可以保留）
+            nn.Conv2d(32, 6, kernel_size=1, bias=True)  # 6通道输出 (T, R)
         )
         
     def forward(self, tokens_list, x_in):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
         
+        if tokens_list[0].ndim == 3:  # 3维张量
+            for i, tokens in enumerate(tokens_list):
+                B, N, C = tokens.shape
+                H = W = int(math.sqrt(N))
+                tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+                # (B C H W)
+        else:
+            tokens_list = tokens_list
+            pass  # 已经是(B C H W)格式
+
         f0,f1,f2,f3 = tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
 
         o2 = self.convblock23((f2 + self.upsample3(f3)))

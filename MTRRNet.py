@@ -383,11 +383,17 @@ class MTRRNet(nn.Module):
         # RDM保持不变，用于生成rmap
         # self.rdm = RDM()
         
+        self.use_rev = True
+
         # 编码器
         self.token_encoder = Encoder(
             mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
             drop_branch_prob=0.2
+        )
+        self.token_decoder0 = UnifiedTokenDecoder(
+            embed_dims=[96,192,384,768],         # 输入token维度
+            base_scale_init=0.3    # base缩放因子初始值
         )
         
 
@@ -396,7 +402,7 @@ class MTRRNet(nn.Module):
             embed_dims=[96,192,384,768],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
             # mam_blocks=[3, 3, 3, 3],           # 融合细化的block数
-            use_rev=True
+            use_rev=self.use_rev
         )
         self.token_decoder1 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
@@ -408,7 +414,7 @@ class MTRRNet(nn.Module):
             embed_dims=[96,192,384,768],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
             # mam_blocks=[3, 3, 3, 3],           # 融合细化的block数
-            use_rev=True
+            use_rev=self.use_rev
         )
         self.token_decoder2 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
@@ -419,7 +425,7 @@ class MTRRNet(nn.Module):
         self.token_subnet3 = SubNet(
             embed_dims=[96,192,384,768],         # 融合后的token维度
             mam_blocks=[6, 6, 6, 6],           # 融合细化的block数
-            use_rev=True
+            use_rev=self.use_rev
         )
         self.token_decoder3 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
@@ -439,6 +445,8 @@ class MTRRNet(nn.Module):
         tokens_list = self.token_encoder(x_in)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
+        out0 = self.token_decoder0(tokens_list, x_in)
+        
         # 3. Token SubNet融合
         # fused_tokens = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
@@ -454,7 +462,7 @@ class MTRRNet(nn.Module):
         tokens_list = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
         out3 = self.token_decoder3(tokens_list, x_in)  # (B, 6, 256, 256)
 
-        outs = [out1,out2,out3]
+        outs = [out0,out1,out2,out3]
         
         return outs
 
@@ -470,8 +478,8 @@ class MTRREngine(nn.Module):
         self.device = device 
         self.opts  = opts
         self.visual_names = ['fake_Ts', 'fake_Rs', 'c_map', 'I', 'Ic', 'T', 'R']
-        self.fake_Ts = [None]*3  # 存储三个尺度的去反射图
-        self.fake_Rs = [None]*3  # 存储三个尺度的反射图
+        self.fake_Ts = [None]*4  # 存储三个尺度的去反射图
+        self.fake_Rs = [None]*4  # 存储三个尺度的反射图
         self.netG_T = MTRRNet().to(device)  
         self.net_c = net_c  
 

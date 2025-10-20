@@ -281,7 +281,8 @@ class DSRDataset(BaseDataset):
 # size：限制加载的数据量 当size=0时 len=0 数据集程序会当成index_out错误自动停止
 class DSRTestDataset(BaseDataset):
     def __init__(self, datadir, fns=None, size=None, enable_transforms=False, unaligned_transforms=False,
-                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256], SamplerSize=False):
+                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256], SamplerSize=False,
+                 color_match=True, color_jitter=False):
         super(DSRTestDataset, self).__init__()
         self.size = size
         self.datadir = datadir
@@ -293,6 +294,9 @@ class DSRTestDataset(BaseDataset):
         self.if_align = True # if_align
         self.real = real
         self.HW = HW
+        # 是否进行颜色直方图匹配：将 m_img 的颜色分布匹配到 t_img
+        self.color_match = color_match
+        self.color_jitter = color_jitter
         
         self.I_paths = []
         self.R_paths = []
@@ -374,6 +378,14 @@ class DSRTestDataset(BaseDataset):
         except Exception:
             t_img = m_img.copy()  # 如果没有目标图像，则使用混合图像作为目标
         
+        # 可选：将 m_img 的颜色分布匹配到 t_img（直方图匹配）
+        if self.color_match:
+            try:
+                m_img = self._hist_match_rgb(m_img, t_img)
+            except Exception as e:
+                # 颜色匹配失败则跳过，保持原图
+                pass
+            
         try:
             r_img = Image.open(self.R_paths_s[index]).convert('RGB')
         except Exception:
@@ -384,6 +396,15 @@ class DSRTestDataset(BaseDataset):
 
         if self.if_align:
             t_img, m_img, r_img = self.align(t_img, m_img, r_img)
+
+            
+        if self.color_jitter:
+            # 颜色扰动：默认只对 m_img 生效，并重算 r_img
+            m_img, t_img, r_img = _maybe_color_jitter(
+                m_img, t_img, r_img,
+                p=0.8, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
+                apply_to_label=True, recompute_residual=False
+            )          
 
         B = TF.to_tensor(t_img)
         M = TF.to_tensor(m_img)
@@ -400,6 +421,41 @@ class DSRTestDataset(BaseDataset):
             return min(len(self.I_paths), self.size)
         else:
             return len(self.I_paths)
+
+    # --- 工具：RGB 直方图匹配 ---
+    def _hist_match_rgb(self, src_img: Image.Image, ref_img: Image.Image, bins: int = 256) -> Image.Image:
+        """
+        将 src_img（m_img）的颜色分布直方图匹配到 ref_img（t_img）。
+        逐通道（R/G/B）执行灰度直方图匹配，然后合并。
+
+        不依赖额外库，实现参考：对每个通道计算累计直方图并做分位数插值映射。
+        """
+        src = np.asarray(src_img.convert('RGB'))
+        ref = np.asarray(ref_img.convert('RGB'))
+
+        def _match_channel(s, r):
+            s = s.ravel()
+            r = r.ravel()
+            # 源唯一值及其在扁平数组中的反向索引、计数
+            s_values, bin_idx, s_counts = np.unique(s, return_inverse=True, return_counts=True)
+            # 目标唯一值及计数
+            r_values, r_counts = np.unique(r, return_counts=True)
+            # 累计分布（分位数）
+            s_quantiles = np.cumsum(s_counts).astype(np.float64)
+            s_quantiles /= s_quantiles[-1]
+            r_quantiles = np.cumsum(r_counts).astype(np.float64)
+            r_quantiles /= r_quantiles[-1]
+            # 按分位数把源的唯一值映射到目标的像素值
+            interp_values = np.interp(s_quantiles, r_quantiles, r_values)
+            matched = interp_values[bin_idx].reshape((-1,))
+            return matched
+
+        out = np.empty_like(src)
+        for c in range(3):
+            out[..., c] = _match_channel(src[..., c], ref[..., c]).reshape(src.shape[:2])
+
+        out = np.clip(out, 0, 255).astype(np.uint8)
+        return Image.fromarray(out, mode='RGB')
 
 
 
@@ -728,10 +784,10 @@ class HyperKDataset(Dataset):
 
         if self.color_jitter:
             # 颜色扰动：默认只对 m_img 生效，并重算 r_img
-            m_img, t_img, r_img = self._maybe_color_jitter(
+            m_img, t_img, r_img = _maybe_color_jitter(
                 m_img, t_img, r_img,
                 p=0.8, brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
-                apply_to_label=False, recompute_residual=False
+                apply_to_label=True, recompute_residual=False
             )        
 
         T = TF.to_tensor(t_img)
@@ -745,51 +801,51 @@ class HyperKDataset(Dataset):
     def __len__(self):
         return len(self.I_paths)
 
-    # 放在类 HyperKDataset 内部
-    def _maybe_color_jitter(self, m_img, t_img, r_img,
-                            p=0.8,
-                            brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
-                            apply_to_label=False,   # 一般 False：不改 label
-                            recompute_residual=True # True：扰动后重算 r=m-t
-                            ):
-        """对输入图像做颜色扰动：亮度/对比度/饱和度/色调。
-        默认只扰动 m_img；若 apply_to_label=True，则 t_img 同步扰动。
-        """
-        if random.random() >= p:
-            return m_img, t_img, r_img
-
-        # 采样一次固定的扰动参数
-        jitter = T.ColorJitter(brightness=brightness, contrast=contrast,
-                            saturation=saturation, hue=hue)
-        fn_idx, b, c, s, h = T.ColorJitter.get_params(
-            jitter.brightness, jitter.contrast, jitter.saturation, jitter.hue
-        )
-
-        def apply_one(img):
-            # 按随机顺序依次应用 4 个操作
-            for fn_id in fn_idx:
-                if fn_id == 0 and b is not None:
-                    img = TF.adjust_brightness(img, b)
-                elif fn_id == 1 and c is not None:
-                    img = TF.adjust_contrast(img, c)
-                elif fn_id == 2 and s is not None:
-                    img = TF.adjust_saturation(img, s)
-                elif fn_id == 3 and h is not None:
-                    img = TF.adjust_hue(img, h)
-            return img
-
-        # 只扰动 input
-        m_img = apply_one(m_img)
-
-        # （可选）同步扰动 label
-        if apply_to_label:
-            t_img = apply_one(t_img)
-
-        # （可选）重算 residual，保持 r=m-t 一致
-        if recompute_residual:
-            m_np = np.array(m_img, dtype=np.float32)
-            t_np = np.array(t_img, dtype=np.float32)
-            r_np = np.clip(m_np - t_np, 0, 255).astype(np.uint8)
-            r_img = Image.fromarray(r_np)
-
+# 放在类 HyperKDataset 内部
+def _maybe_color_jitter(m_img, t_img, r_img,
+                        p=0.8,
+                        brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
+                        apply_to_label=False,   # 一般 False：不改 label
+                        recompute_residual=True # True：扰动后重算 r=m-t
+                        ):
+    """对输入图像做颜色扰动：亮度/对比度/饱和度/色调。
+    默认只扰动 m_img；若 apply_to_label=True，则 t_img 同步扰动。
+    """
+    if random.random() >= p:
         return m_img, t_img, r_img
+
+    # 采样一次固定的扰动参数
+    jitter = T.ColorJitter(brightness=brightness, contrast=contrast,
+                        saturation=saturation, hue=hue)
+    fn_idx, b, c, s, h = T.ColorJitter.get_params(
+        jitter.brightness, jitter.contrast, jitter.saturation, jitter.hue
+    )
+
+    def apply_one(img):
+        # 按随机顺序依次应用 4 个操作
+        for fn_id in fn_idx:
+            if fn_id == 0 and b is not None:
+                img = TF.adjust_brightness(img, b)
+            elif fn_id == 1 and c is not None:
+                img = TF.adjust_contrast(img, c)
+            elif fn_id == 2 and s is not None:
+                img = TF.adjust_saturation(img, s)
+            elif fn_id == 3 and h is not None:
+                img = TF.adjust_hue(img, h)
+        return img
+
+    # 只扰动 input
+    m_img = apply_one(m_img)
+
+    # （可选）同步扰动 label
+    if apply_to_label:
+        t_img = apply_one(t_img)
+
+    # （可选）重算 residual，保持 r=m-t 一致
+    if recompute_residual:
+        m_np = np.array(m_img, dtype=np.float32)
+        t_np = np.array(t_img, dtype=np.float32)
+        r_np = np.clip(m_np - t_np, 0, 255).astype(np.uint8)
+        r_img = Image.fromarray(r_np)
+
+    return m_img, t_img, r_img

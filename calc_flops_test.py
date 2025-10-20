@@ -11,7 +11,7 @@ from MTRRNet import MTRREngine
 # ----------------------
 # 2. 加载模型
 # ----------------------
-model = MTRREngine(device='cuda', training=False)
+model = MTRREngine(device='cuda')
 
 model.eval()
 
@@ -44,6 +44,7 @@ def count_vmamba(m, x, y):
     m.total_ops += torch.tensor([flops], dtype=torch.float64, device=inp.device)
     mamba_flops += flops
     mamba_params += sum(p.numel() for p in m.parameters())
+
 
 # --- Swin ---
 swin_flops = 0
@@ -86,11 +87,12 @@ def count_transformer_block(m, x, y):
     swin_params += sum(p.numel() for p in m.parameters())
 # 注册自定义 hook
 
-from token_modules import VSSTokenMambaModule,SwinTokenBlock
+from token_modules import VSSTokenMambaModule,SwinTokenBlock,Mamba2Blocks_Standard
 import thop
 
 custom_ops = {
     VSSTokenMambaModule: count_vmamba,
+    Mamba2Blocks_Standard: count_vmamba,
     SwinTokenBlock: count_transformer_block,
     torch.nn.Conv2d: count_convNd,
     torch.nn.Linear: count_linear,

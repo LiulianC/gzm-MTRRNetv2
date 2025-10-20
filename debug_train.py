@@ -20,7 +20,7 @@ class DebugOpts:
         self.num_workers = 0
         self.enable_finetune = False
         self.model_path = './model_fit/model_latest.pth'
-        self.model_path = None
+        # self.model_path = None
         self.always_print = 1  # 总是打印所有层
 
 opts = DebugOpts()
@@ -206,46 +206,27 @@ param_groups = []
 LearnRate = 1e-4
 lr_map = {
     'token_encoder.patchembed': 1e-4,
-    'token_encoder.encoder_unit0': 2e-3,
+    'token_encoder.encoder_unit0': 5e-3,
     'token_encoder.encoder_unit1': 1e-3,
-    'token_encoder.encoder_unit2': 9e-4,    
-    'token_encoder.encoder_unit3': 8e-4,
-    'token_subnet1': 7e-4,
-    'token_subnet2': 5e-4,
-    'token_subnet3': 3e-4,
+    'token_encoder.encoder_unit2': 5e-4,    
+    'token_encoder.encoder_unit3': 1e-4,
+    'token_subnet1': 1e-4,
+    'toke_subnet3': 1e-4,
 
-    'token_encoder.encoder_unit0.mamba_processor': 2e-3,
-    'token_encoder.encoder_unit1.mamba_processor': 1e-3,
-    'token_encoder.encoder_unit2.mamba_processor': 9e-4,
-    'token_encoder.encoder_unit3.mamba_processor': 8e-4,
+    # 'token_encoder.encoder_unit0.mamba_processor': 2e-3,
+    # 'token_encoder.encoder_unit1.mamba_processor': 1e-3,
+    # 'token_encoder.encoder_unit2.mamba_processor': 9e-4,
+    # 'token_encoder.encoder_unit3.mamba_processor': 8e-4,
 
-    'token_subnet1.mamba_blocks.1': 5e-3,
     'token_subnet1.mamba_blocks.2': 5e-3,
+    'token_subnet1.mamba_blocks.3': 5e-3,
 
-    'token_subnet2.mamba_blocks.1': 5e-3,
     'token_subnet2.mamba_blocks.2': 5e-3,
+    'token_subnet2.mamba_blocks.3': 5e-3,
     
-    'token_subnet3.mamba_blocks.1': 5e-3,
     'token_subnet3.mamba_blocks.2': 5e-3,
-
-    'token_decoder1.decoder': 1e-3,
-    'token_decoder2.decoder': 1e-3,
-    'token_decoder3.decoder': 1e-3,
-
-    'token_decoder1.upsample1': 1e-3,
-    'token_decoder2.upsample1': 1e-3,
-    'token_decoder3.upsample1': 1e-3,
-
-    'token_decoder1.upsample2': 1e-3,
-    'token_decoder2.upsample2': 1e-3,
-    'token_decoder3.upsample2': 1e-3,
-
-    'token_decoder1.upsample3': 1e-3,
-    'token_decoder2.upsample3': 1e-3,
-    'token_decoder3.upsample3': 1e-3,
-
-
-
+    'tn_subnet2': 1e-4,
+    'tokenoken_subnet3.mamba_blocks.3': 5e-3,
 }
 
 # 为每个模块分别收集参数
@@ -299,7 +280,7 @@ if module_params['other']['decay']:
     param_groups.append({
         'params': module_params['other']['decay'],
         'lr': LearnRate,
-        'weight_decay': 0.0,
+        'weight_decay':0.0,
         'name': 'other_decay'
     })
 if module_params['other']['no_decay']:
@@ -311,7 +292,6 @@ if module_params['other']['no_decay']:
     })
 
 optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
-
 
 # for i, group in enumerate(optimizer.param_groups):
 #     wd = group.get("weight_decay", None)
@@ -379,16 +359,21 @@ for batch_idx, data in enumerate(train_loader):
 
     # 计算损失
     print("Computing loss...")
-    _, _, _, _, _, all_loss1 = loss_function(
+    # 计算四个阶段的损失，确保第4个输出(out3)参与反传
+    _, _, _, _, _, all_loss0 = loss_function(
         train_fake_Ts[0], train_label1, train_ipt, train_rcmaps, train_fake_Rs[0], train_label2
     )
-    _, _, _, _, _, all_loss2 = loss_function(
+    _, _, _, _, _, all_loss1 = loss_function(
         train_fake_Ts[1], train_label1, train_ipt, train_rcmaps, train_fake_Rs[1], train_label2
     )
-    loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss3 = loss_function(
+    _, _, _, _, _, all_loss2 = loss_function(
         train_fake_Ts[2], train_label1, train_ipt, train_rcmaps, train_fake_Rs[2], train_label2
     )
-    all_loss = 0.2*all_loss1 + 0.4*all_loss2 + all_loss3
+    loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss3 = loss_function(
+        train_fake_Ts[3], train_label1, train_ipt, train_rcmaps, train_fake_Rs[3], train_label2
+    )
+    # 与主训练脚本保持一致的权重设置，保证梯度覆盖到最后一阶段
+    all_loss = 0.5*all_loss0 + 0.5*all_loss1 + 0.5*all_loss2 + 1.0*all_loss3
 
     print(f"Loss: {all_loss.item():.6f} | MSE: {mse_loss.item():.6f} | VGG: {vgg_loss.item():.6f} | SSIM: {ssim_loss.item():.6f}")
 
@@ -430,15 +415,13 @@ for batch_idx, data in enumerate(train_loader):
                     status = " [Inf DETECTED!]"
                 elif abs(grad_norm) > 100:
                     status = " [Large Gradient]"
-                elif abs(grad_norm) < 1e-6 :
+                elif abs(grad_norm) < 1e-6:
                     status = " [Vanishing]"
 
-                msg = (f"{name:<100} | {grad_mean:>15.8e} | {grad_std:>15.8e} | "
-                       f"{grad_min:>15.8e} | {grad_max:>15.8e} | {grad_norm:>15.8e}{status}")
-                f.write(msg + '\n')
-            else:
-                msg = f"{name:<100} | {'N/A':>15} | {'N/A':>15} | {'N/A':>15} | {'N/A':>15} | {'N/A':>15} [No Gradient]"
-                f.write(msg + '\n')
+                msg = (f"{name:<100} | {grad_mean:>15.8e} | {grad_std:>15.8e} | "f"{grad_min:>15.8e} | {grad_max:>15.8e} | {grad_norm:>15.8e}{status}")
+                f.write(msg + '\n')                
+                    
+
 
 
     # 更新参数
