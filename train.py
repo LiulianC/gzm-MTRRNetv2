@@ -1,7 +1,6 @@
 import os
 import argparse
 import torch
-from torch.utils.tensorboard import SummaryWriter
 import warnings
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -10,18 +9,21 @@ from torchvision.utils import save_image
 from multiprocessing import freeze_support
 import datetime
 import csv
+
+from dataset.quality_index import *
+from dataset.new_dataset1 import *
 from torch.utils.data import ConcatDataset
+
 from MTRRNet import MTRREngine
 from early_stop import EarlyStopping
 from customloss import CustomLoss
-from dataset.quality_index import *
-from dataset.new_dataset1 import *
 from torch import amp
 scaler = amp.GradScaler()
 from set_seed import set_seed 
 from torchvision.utils import make_grid
 from util.csv import write_csv_row, _to_float
 from util.eval_util import _collect_and_zero_probs, eval_no_dropout
+from util.color_enhance import hist_match_batch_tensor
 from psdLoss.spec_loss_pack import SpecularityNetLossPack
 
 warnings.filterwarnings('ignore')
@@ -51,12 +53,13 @@ opts.sampler_size3 = 8
 opts.sampler_size4 = 0
 opts.sampler_size5 = 12
 opts.test_size = [200,0,0,0,200,200]
-opts.model_path='./model_fit/model_latest.pth'  
-opts.model_path='./model_fit/model_best_29.pth'  
-# opts.model_path=None  #如果要load就注释我
+# opts.model_path='./model_fit/model_latest.pth'  
+# opts.model_path='./model_fit/model_62.pth'  
+opts.model_path=None  #如果要load就注释我
+opts.reset_best = True
 
-opts.scheduler_type = 'plateau'  # 'plateau' or 'cosine'
-# opts.scheduler_type = 'cosine'  # 'plateau' or 'cosine'
+# opts.scheduler_type = 'plateau'  # 'plateau' or 'cosine'
+opts.scheduler_type = 'cosine'  # 'plateau' or 'cosine'
 
 # current_lr = 1e-4 # 不可大于1e-5 否则会引起深层网络的梯度爆炸
  
@@ -93,7 +96,7 @@ tissue_gen = '/home/gzm/gzm-MTRRVideo/data/tissue_gen'
 tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVideo/data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
 tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True, color_match=True)
+tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True, color_match=False)
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
@@ -110,7 +113,7 @@ train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_siz
 
 
 test_data_dir1 = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], SamplerSize=False, color_match=True)
+test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], SamplerSize=False, color_match=False)
 
 test_data_dir2 = '/home/gzm/gzm-MTRRVideo/data/hyperK_000'
 test_data2 = TestDataset(datadir=test_data_dir2, fns='/home/gzm/gzm-MTRRVideo/data/hyperK_000_list.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[1])
@@ -178,30 +181,46 @@ if __name__ == '__main__':
     LearnRate = 1e-4
     
     lr_map = {
-        'token_encoder.patchembed': 1e-4,
-        'token_encoder.encoder_unit0': 5e-3,
-        'token_encoder.encoder_unit1': 1e-3,
-        'token_encoder.encoder_unit2': 5e-4,    
-        'token_encoder.encoder_unit3': 1e-4,
-        'token_subnet1': 1e-4,
-        'token_subnet2': 1e-4,
-        'token_subnet3': 1e-4,
+        # ---- 头（heads）----
+        'token_decoder3': 2.000000e-02,  # 最终输出头（×4）
+        'token_decoder2': 1.500000e-02,  # 中间头（×3）
+        'token_decoder1': 1.500000e-02,  # 中间头（×3）
+        'token_decoder0': 5.000000e-03,  # 早期头（= base）
 
-        # 'token_encoder.encoder_unit0.mamba_processor': 2e-3,
-        # 'token_encoder.encoder_unit1.mamba_processor': 1e-3,
-        # 'token_encoder.encoder_unit2.mamba_processor': 9e-4,
-        # 'token_encoder.encoder_unit3.mamba_processor': 8e-4,
+        # ---- 从输出端到输入端，按 γ=0.93 衰减（lr_base=5e-3）----
+        # subnet3（最靠近输出）
+        'token_subnet3.mamba_blocks.3': 5.000000e-03,  # d=0
+        'token_subnet3.mamba_blocks.2': 4.650000e-03,  # d=1
+        'token_subnet3.mamba_blocks.1': 4.324500e-03,  # d=2
+        'token_subnet3.mamba_blocks.0': 4.021785e-03,  # d=3
 
-        'token_subnet1.mamba_blocks.2': 5e-3,
-        'token_subnet1.mamba_blocks.3': 5e-3,
+        # subnet2
+        'token_subnet2.mamba_blocks.3': 3.740260e-03,  # d=4
+        'token_subnet2.mamba_blocks.2': 3.478442e-03,  # d=5
+        'token_subnet2.mamba_blocks.1': 3.234951e-03,  # d=6
+        'token_subnet2.mamba_blocks.0': 3.008504e-03,  # d=7
 
-        'token_subnet2.mamba_blocks.2': 5e-3,
-        'token_subnet2.mamba_blocks.3': 5e-3,
-        
-        'token_subnet3.mamba_blocks.2': 5e-3,
-        'token_subnet3.mamba_blocks.3': 5e-3,
+        # subnet1
+        'token_subnet1.mamba_blocks.3': 2.797909e-03,  # d=8
+        'token_subnet1.mamba_blocks.2': 2.602055e-03,  # d=9
+        'token_subnet1.mamba_blocks.1': 2.419912e-03,  # d=10
+        'token_subnet1.mamba_blocks.0': 2.250518e-03,  # d=11
+
+        # —— 这些 mamba_processor 容易梯度消失：在对应 encoder_unit 基础上 ×1.5 ——    长后缀排在前面
+        'token_encoder.encoder_unit3.mamba_processor': 3.139472e-03,  # 1.5 × 2.092981e-03
+        'token_encoder.encoder_unit2.mamba_processor': 2.919709e-03,  # 1.5 × 1.946473e-03
+        'token_encoder.encoder_unit1.mamba_processor': 2.715330e-03,  # 1.5 × 1.810220e-03
+        'token_encoder.encoder_unit0.mamba_processor': 2.525256e-03,  # 1.5 × 1.683504e-03
+
+        # encoder（越往下越小）
+        'token_encoder.encoder_unit3': 2.092981e-03,  # d=12
+        'token_encoder.encoder_unit2': 1.946473e-03,  # d=13
+        'token_encoder.encoder_unit1': 1.810220e-03,  # d=14
+        'token_encoder.encoder_unit0': 1.683504e-03,  # d=15
+
+        # 最早的嵌入
+        'token_encoder.patchembed':    1.565659e-03,  # d=16
     }
- 
 
     # 为每个模块分别收集参数
     module_params = {k: {'decay': [], 'no_decay': []} for k in lr_map.keys()}
@@ -287,9 +306,9 @@ if __name__ == '__main__':
     elif scheduler_type == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=10,                # 初始周期10轮
-            T_mult=2,              # 每次周期×2
-            eta_min=1e-7,
+            T_0=20,                # 初始周期10轮
+            T_mult=1,              # 每次周期×2
+            eta_min=1e-8,
         )
     else:
         raise ValueError(f"Unsupported scheduler_type: {scheduler_type}")
@@ -308,6 +327,9 @@ if __name__ == '__main__':
         best_val_psnr = None
         best_val_ssim = None
         early_stopping_counter = 0
+
+    if opts.reset_best:
+        best_val_loss, best_val_psnr, best_val_ssim = None, None, None
 
     min_loss = best_val_loss if best_val_loss is not None else float('inf') # 初始loss 尽可能大
     max_psnr = best_val_psnr if best_val_psnr is not None else 0
@@ -521,6 +543,12 @@ if __name__ == '__main__':
 
                     total_test_loss += loss.item()
 
+
+
+
+                    # test_fake_Ts[-1] = hist_match_batch_tensor(test_fake_Ts[-1], test_label1)
+
+
                     # 计算psnr与ssim与NCC与LMSN
                     index = quality_assess(test_fake_Ts[-1].to('cpu'), test_label1.to('cpu'))
                     file_name, psnr, ssim, lmse, ncc = test_data1['fn'], index['PSNR'], index['SSIM'], index['LMSE'], index['NCC']
@@ -552,10 +580,17 @@ if __name__ == '__main__':
                     sum_ncc  += ncc  * batch_n
                     sample_cnt += batch_n
 
+                    if getattr(opts, 'throttle_ms', 0) > 0:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        time.sleep(opts.throttle_ms / 1000.0)
+
                     if (i+1) % 5 == 0 & total_test_step % 1 == 0:
+                    # if i % 1 == 0 & total_test_step % 1 == 0:
+
+                        
 
                         B = test_imgs.size(0)
-
                         # 每行各自拼 batch
                         grid_in  = make_grid(test_imgs, nrow=B, padding=2)
                         grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=2)

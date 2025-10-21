@@ -393,7 +393,7 @@ class MTRRNet(nn.Module):
         )
         self.token_decoder0 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
-            base_scale_init=0.3    # base缩放因子初始值
+            base_scale_init=0.7    # base缩放因子初始值
         )
         
 
@@ -406,7 +406,7 @@ class MTRRNet(nn.Module):
         )
         self.token_decoder1 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
-            base_scale_init=0.3    # base缩放因子初始值
+            base_scale_init=0.7    # base缩放因子初始值
         )
 
 
@@ -418,7 +418,7 @@ class MTRRNet(nn.Module):
         )
         self.token_decoder2 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
-            base_scale_init=0.3    # base缩放因子初始值
+            base_scale_init=0.7    # base缩放因子初始值
         )
 
 
@@ -429,7 +429,7 @@ class MTRRNet(nn.Module):
         )
         self.token_decoder3 = UnifiedTokenDecoder(
             embed_dims=[96,192,384,768],         # 输入token维度
-            base_scale_init=0.3    # base缩放因子初始值
+            base_scale_init=0.7    # base缩放因子初始值
         )
 
 

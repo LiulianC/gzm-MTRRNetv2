@@ -20,7 +20,7 @@ class DebugOpts:
         self.num_workers = 0
         self.enable_finetune = False
         self.model_path = './model_fit/model_latest.pth'
-        # self.model_path = None
+        self.model_path = None
         self.always_print = 1  # 总是打印所有层
 
 opts = DebugOpts()
@@ -204,30 +204,52 @@ param_groups = []
 
 # 模块名称到学习率的映射
 LearnRate = 1e-4
+
+# lr_base = 5e-3, gamma = 0.93
 lr_map = {
-    'token_encoder.patchembed': 1e-4,
-    'token_encoder.encoder_unit0': 5e-3,
-    'token_encoder.encoder_unit1': 1e-3,
-    'token_encoder.encoder_unit2': 5e-4,    
-    'token_encoder.encoder_unit3': 1e-4,
-    'token_subnet1': 1e-4,
-    'toke_subnet3': 1e-4,
+    # ---- 头（heads）----
+    'token_decoder3': 2.000000e-02,  # 最终输出头（×4）
+    'token_decoder2': 1.500000e-02,  # 中间头（×3）
+    'token_decoder1': 1.500000e-02,  # 中间头（×3）
+    'token_decoder0': 5.000000e-03,  # 早期头（= base）
 
-    # 'token_encoder.encoder_unit0.mamba_processor': 2e-3,
-    # 'token_encoder.encoder_unit1.mamba_processor': 1e-3,
-    # 'token_encoder.encoder_unit2.mamba_processor': 9e-4,
-    # 'token_encoder.encoder_unit3.mamba_processor': 8e-4,
+    # ---- 从输出端到输入端，按 γ=0.93 衰减（lr_base=5e-3）----
+    # subnet3（最靠近输出）
+    'token_subnet3.mamba_blocks.3': 5.000000e-03,  # d=0
+    'token_subnet3.mamba_blocks.2': 4.650000e-03,  # d=1
+    'token_subnet3.mamba_blocks.1': 4.324500e-03,  # d=2
+    'token_subnet3.mamba_blocks.0': 4.021785e-03,  # d=3
 
-    'token_subnet1.mamba_blocks.2': 5e-3,
-    'token_subnet1.mamba_blocks.3': 5e-3,
+    # subnet2
+    'token_subnet2.mamba_blocks.3': 3.740260e-03,  # d=4
+    'token_subnet2.mamba_blocks.2': 3.478442e-03,  # d=5
+    'token_subnet2.mamba_blocks.1': 3.234951e-03,  # d=6
+    'token_subnet2.mamba_blocks.0': 3.008504e-03,  # d=7
 
-    'token_subnet2.mamba_blocks.2': 5e-3,
-    'token_subnet2.mamba_blocks.3': 5e-3,
-    
-    'token_subnet3.mamba_blocks.2': 5e-3,
-    'tn_subnet2': 1e-4,
-    'tokenoken_subnet3.mamba_blocks.3': 5e-3,
+    # subnet1
+    'token_subnet1.mamba_blocks.3': 2.797909e-03,  # d=8
+    'token_subnet1.mamba_blocks.2': 2.602055e-03,  # d=9
+    'token_subnet1.mamba_blocks.1': 2.419912e-03,  # d=10
+    'token_subnet1.mamba_blocks.0': 2.250518e-03,  # d=11
+
+    # —— 这些 mamba_processor 容易梯度消失：在对应 encoder_unit 基础上 ×1.5 ——    长后缀排在前面
+    'token_encoder.encoder_unit3.mamba_processor': 3.139472e-03,  # 1.5 × 2.092981e-03
+    'token_encoder.encoder_unit2.mamba_processor': 2.919709e-03,  # 1.5 × 1.946473e-03
+    'token_encoder.encoder_unit1.mamba_processor': 2.715330e-03,  # 1.5 × 1.810220e-03
+    'token_encoder.encoder_unit0.mamba_processor': 2.525256e-03,  # 1.5 × 1.683504e-03
+
+    # encoder（越往下越小）
+    'token_encoder.encoder_unit3': 2.092981e-03,  # d=12
+    'token_encoder.encoder_unit2': 1.946473e-03,  # d=13
+    'token_encoder.encoder_unit1': 1.810220e-03,  # d=14
+    'token_encoder.encoder_unit0': 1.683504e-03,  # d=15
+
+    # 最早的嵌入
+    'token_encoder.patchembed':    1.565659e-03,  # d=16
 }
+
+
+
 
 # 为每个模块分别收集参数
 module_params = {k: {'decay': [], 'no_decay': []} for k in lr_map.keys()}
@@ -292,6 +314,10 @@ if module_params['other']['no_decay']:
     })
 
 optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
+
+if opts.model_path and os.path.exists(opts.model_path):
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    print("Optimizer state loaded successfully")
 
 # for i, group in enumerate(optimizer.param_groups):
 #     wd = group.get("weight_decay", None)

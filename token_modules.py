@@ -1202,7 +1202,7 @@ class ConvNextBlock(nn.Module):
 
 class UnifiedTokenDecoder(nn.Module):
     """统一Token解码器：从token一次性解码为6通道(T,R)"""
-    def __init__(self, embed_dims=[96,192,384,768], base_scale_init=0.3):
+    def __init__(self, embed_dims=[96,192,384,768], base_scale_init=0.1):
         super().__init__()
         
         self.upsample1 = nn.Sequential(
@@ -1261,6 +1261,8 @@ class UnifiedTokenDecoder(nn.Module):
 
         # Base缩放因子
         self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
+        # self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
+        # self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))
         
         
         # 上采样和卷积解码层
@@ -1310,9 +1312,8 @@ class UnifiedTokenDecoder(nn.Module):
         delta = self.decoder(o0)  # (B, 6, 256, 256)
         
         # Base residual: 输入图像的residual base
-        base_input = x_in.repeat(1, 2, 1, 1)  # (B, 6, 256, 256) 复制为T,R base
-        base = self.base_scale * base_input
-        # base = 0.8 * base_input
+        
+        base = torch.cat([self.base_scale*x_in, self.base_scale*x_in], dim=1)  # (B, 6, 256, 256)
 
         # 最终输出 = base + delta
         output = base + delta
