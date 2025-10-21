@@ -1260,9 +1260,9 @@ class UnifiedTokenDecoder(nn.Module):
         
 
         # Base缩放因子
-        self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
-        # self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
-        # self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))
+        # self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
+        self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
+        self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))
         
         
         # 上采样和卷积解码层
@@ -1286,7 +1286,7 @@ class UnifiedTokenDecoder(nn.Module):
             nn.Conv2d(32, 6, kernel_size=1, bias=True)  # 6通道输出 (T, R)
         )
         
-    def forward(self, tokens_list, x_in):
+    def forward(self, tokens_list, resident_tokens_list):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
         
@@ -1300,22 +1300,35 @@ class UnifiedTokenDecoder(nn.Module):
             tokens_list = tokens_list
             pass  # 已经是(B C H W)格式
 
+        if resident_tokens_list[0].ndim == 3:  # 3维张量
+            for i, tokens in enumerate(tokens_list):
+                B, N, C = tokens.shape
+                H = W = int(math.sqrt(N))
+                resident_tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+                # (B C H W)
+        else:
+            resident_tokens_list = resident_tokens_list
+            pass  # 已经是(B C H W)格式
+
         f0,f1,f2,f3 = tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
+        r0,r1,r2,r3 = resident_tokens_list[1],resident_tokens_list[2],resident_tokens_list[3],resident_tokens_list[4]
 
-        o2 = self.convblock23((f2 + self.upsample3(f3)))
+        f3 = f3 + r3
 
-        o1 = self.convblock12((f1 + self.upsample2(o2)))
+        o2 = self.convblock23((f2 + self.upsample3(f3))) + r2 # (B, 384, 16, 16)
 
-        o0 = self.convblock01((f0 + self.upsample1(o1)))
+        o1 = self.convblock12((f1 + self.upsample2(o2))) + r1 # (B, 192, 32, 32)
+
+        o0 = self.convblock01((f0 + self.upsample1(o1))) + r0 # (B, 96, 64, 64)
 
         # 解码
         delta = self.decoder(o0)  # (B, 6, 256, 256)
         
         # Base residual: 输入图像的residual base
         
-        base = torch.cat([self.base_scale*x_in, self.base_scale*x_in], dim=1)  # (B, 6, 256, 256)
+        # base = torch.cat([self.base_scale_T*x_in, self.base_scale_R*x_in], dim=1)  # (B, 6, 256, 256)
 
         # 最终输出 = base + delta
-        output = base + delta
+        output = delta
         
         return output  # (B, 6, 256, 256)
