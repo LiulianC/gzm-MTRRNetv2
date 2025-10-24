@@ -16,6 +16,44 @@ model = MTRREngine(device='cuda')
 model.eval()
 
 # ----------------------
+# 2.1 可选：排除一些不计入 FLOPs/Params 的模块
+# ----------------------
+# 需求：token_decoder0/1/2 用于中间监督，不计入核心模型 flops/params
+# 做法：在仅用于统计时，把这些模块替换成无参无计算的占位模块（NoOpDecoder）
+
+EXCLUDE_DECODERS = [
+    'netG_T.token_decoder0',
+    'netG_T.token_decoder1',
+    'netG_T.token_decoder2',
+]
+
+class NoOpDecoder(torch.nn.Module):
+    def forward(self, tokens_list, resident_tokens_list, x_in):
+        # 生成与解码器输出同形状的零张量 (B, 6, H, W)，不产生额外计算/参数
+        B, _, H, W = x_in.shape
+        return torch.zeros(B, 6, H, W, device=x_in.device, dtype=x_in.dtype)
+
+def _replace_module_by_path(root, dotted_path: str, new_mod: torch.nn.Module):
+    parts = dotted_path.split('.')
+    cur = root
+    for p in parts[:-1]:
+        if not hasattr(cur, p):
+            raise AttributeError(f"Path segment '{p}' not found while resolving '{dotted_path}'")
+        cur = getattr(cur, p)
+    last = parts[-1]
+    if not hasattr(cur, last):
+        raise AttributeError(f"Target attribute '{last}' not found on '{'.'.join(parts[:-1])}'")
+    setattr(cur, last, new_mod)
+
+# 执行替换：仅影响本脚本中的统计，不改动源码
+for path in EXCLUDE_DECODERS:
+    try:
+        _replace_module_by_path(model, path, NoOpDecoder())
+        print(f"[FLOPs] Excluded module by replacement: {path}")
+    except AttributeError as e:
+        print(f"[FLOPs] Skip exclude '{path}': {e}")
+
+# ----------------------
 # 3. 注册自定义 FLOPs
 # ----------------------
 # 用于分别统计 Mamba / Swin

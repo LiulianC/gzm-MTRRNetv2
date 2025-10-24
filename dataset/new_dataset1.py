@@ -851,6 +851,98 @@ class HyperKDataset(Dataset):
     def __len__(self):
         return len(self.I_paths)
 
+class HyperKDataset_Test(Dataset):
+    def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
+                 enable_transforms=False, unaligned_transforms=False,
+                 if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False):
+        # 修正父类初始化，避免 super(type, obj) 传入不相关类型导致的 TypeError
+        super(HyperKDataset_Test, self).__init__()
+        self.root = root
+        self.start = start
+        self.end = end
+        self.size = size
+        self.enable_transforms = enable_transforms
+        self.unaligned_transforms = unaligned_transforms
+        self.if_align = if_align
+        self.HW = HW
+        self.flag = flag
+        self.real = True
+        self.color_jitter = color_jitter
+
+        self.I_paths = []  # 输入
+
+        # 读取 test.json
+        json_path = json_path
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"❌ 找不到 {json_path}")
+        with open(json_path, "r") as f:
+            limits = json.load(f)  # dict, e.g. {"hyperK_343": 1982, ...}
+
+        # 遍历编号
+        for idx in range(start, end + 1):
+            folder_name = f"hyperK_{idx:03d}"
+            input_dir = os.path.join(root, folder_name)
+
+            if not os.path.exists(input_dir):
+                print(f"⚠️ 跳过 {folder_name} 不存在")
+                continue
+
+            # 限制数量
+            limit = limits.get(folder_name, None)
+            input_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".jpg")])
+            if limit is not None:
+                input_files = input_files[:limit]
+
+            for fname in input_files:
+                input_path = os.path.join(input_dir, fname)
+                if os.path.exists(input_path):
+                    self.I_paths.append(input_path)
+                else:
+                    print(f"⚠️ input未找到: {input_path}")
+
+
+
+
+        # 随机抽样
+        if size == 0:
+            self.I_paths = []
+        elif size is not None and size <= len(self.I_paths) and SamplerSize:
+            # 如果需要随机抽样
+            zipped = list(self.I_paths)
+            self.I_paths = random.sample(zipped, size)
+        elif size is not None and size > 0 and size <= len(self.I_paths):
+            # 在0~最大长度范围内平均采样size个样本
+            total_length = len(self.I_paths)
+            indices = np.linspace(0, total_length - 1, size, dtype=int)
+            self.I_paths = [self.I_paths[i] for i in indices]
+        else:
+            self.I_paths= self.I_paths
+
+
+    def align(self, x1, x2, x3):
+        h, w = self.HW
+        h, w = h // 32 * 32, w // 32 * 32
+        x1 = x1.resize((w, h))
+        x2 = x2.resize((w, h))
+        x3 = x3.resize((w, h))
+        return x1, x2, x3
+
+    def __getitem__(self, index):
+        filename = os.path.basename(self.I_paths[index]).replace(".png", "")
+
+        m_img = Image.open(self.I_paths[index]).convert("RGB")   
+
+        m_img = m_img.resize((256,256))   
+
+        M = TF.to_tensor(m_img)
+
+        dic = {'input': M, 'fn': filename, 'real': self.real}
+
+        return dic
+
+    def __len__(self):
+        return len(self.I_paths)
+
 # 放在类 HyperKDataset 内部
 def _maybe_color_jitter(m_img, t_img, r_img,
                         p=0.8,

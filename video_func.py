@@ -9,13 +9,15 @@ import argparse
 from datetime import datetime
 import time
 from tqdm import tqdm
+from util.color_enhance import histogram_equalization_lab,hist_match_batch_tensor
+
 
 parser = argparse.ArgumentParser()
-# parser.add_argument("--input", type=str, default='/home/gzm/gzm-compare/dataset/JPEGImages/hyperK_000.zip', help="输入文件路径")
-parser.add_argument("--input", type=str, default='./data/med20mins.mp4', help="输入文件路径")
+parser.add_argument("--input", type=str, default='/home/gzm/gzm-compare/dataset/JPEGImages/hyperK_202.zip', help="输入文件路径")
+# parser.add_argument("--input", type=str, default='./data/med1.mp4', help="输入文件路径")
 parser.add_argument("--output", type=str, default='./test_results', help="输出文件夹")
 parser.add_argument("--model", type=str, default='MTRRNet', help="模型文件名称")
-parser.add_argument("--ckptpath", type=str, default='./model_fit/model_latest.pth', help="权重文件路径")
+parser.add_argument("--ckptpath", type=str, default='./model_fit/model_62_best1.pth', help="权重文件路径")
 parser.add_argument("--batchsize", type=int, default=16, help="batch大小")
 args = parser.parse_args()
 default_fps = 30
@@ -101,7 +103,8 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=24, batch_size=8
             model.set_input(data)
             model.inference()
             visual_result = model.get_current_visuals()
-            out = visual_result['fake_T']
+            out = visual_result['fake_Ts'][-1]
+            out = hist_match_batch_tensor(out,inp)
 
             # 后处理成图像列表
             out = out.permute(0,2,3,1).cpu().numpy()  # [B,H,W,3]
@@ -126,8 +129,8 @@ def main_worker():
 
     # 动态导入模型
     net = importlib.import_module(args.model)
-    model = net.MTRREngine(args, device=device, training=False)
-    model_state = torch.load(args.ckptpath, map_location=device)
+    model = net.MTRREngine(args, device=device)
+    model_state = torch.load(args.ckptpath, map_location=device, weights_only=False)
     model.netG_T.load_state_dict({k.replace('netG_T.', ''): v for k, v in model_state['netG_T'].items()})
     model.eval()
 

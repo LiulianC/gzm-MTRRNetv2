@@ -1286,7 +1286,7 @@ class UnifiedTokenDecoder(nn.Module):
             nn.Conv2d(32, 6, kernel_size=1, bias=True)  # 6通道输出 (T, R)
         )
         
-    def forward(self, tokens_list, resident_tokens_list):
+    def forward(self, tokens_list, resident_tokens_list, x_in):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
         
@@ -1301,10 +1301,11 @@ class UnifiedTokenDecoder(nn.Module):
             pass  # 已经是(B C H W)格式
 
         if resident_tokens_list[0].ndim == 3:  # 3维张量
-            for i, tokens in enumerate(tokens_list):
-                B, N, C = tokens.shape
+            # 注意：这里应遍历 resident_tokens_list 自身，避免误用 tokens_list
+            for i, res_tokens in enumerate(resident_tokens_list):
+                B, N, C = res_tokens.shape
                 H = W = int(math.sqrt(N))
-                resident_tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+                resident_tokens_list[i] = res_tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
                 # (B C H W)
         else:
             resident_tokens_list = resident_tokens_list
@@ -1324,11 +1325,12 @@ class UnifiedTokenDecoder(nn.Module):
         # 解码
         delta = self.decoder(o0)  # (B, 6, 256, 256)
         
-        # Base residual: 输入图像的residual base
-        
-        # base = torch.cat([self.base_scale_T*x_in, self.base_scale_R*x_in], dim=1)  # (B, 6, 256, 256)
+        # Base residual: 输入图像的 residual base（T、R 分别保留一份轻微的输入基线）
+        # 这里按通道维拼接，无需在 batch 维做任何复制；形状保持为 (B,6,H,W)
+        output = delta + torch.cat([
+            self.base_scale_T * x_in,  # 对应 T 分支的基线
+            self.base_scale_R * x_in   # 对应 R 分支的基线
+        ], dim=1)  # (B, 6, 256, 256)
 
-        # 最终输出 = base + delta
-        output = delta
         
         return output  # (B, 6, 256, 256)

@@ -447,7 +447,7 @@ class MTRRNet(nn.Module):
         
         resident_tokens_list = tokens_list 
 
-        out0 = self.token_decoder0(tokens_list, resident_tokens_list)
+        out0 = self.token_decoder0(tokens_list, resident_tokens_list, x_in)
         
         # 3. Token SubNet融合
         # fused_tokens = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
@@ -456,13 +456,13 @@ class MTRRNet(nn.Module):
         # fused_tokens = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
 
         tokens_list = self.token_subnet1(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        out1 = self.token_decoder1(tokens_list, resident_tokens_list)  # (B, 6, 256, 256)
+        out1 = self.token_decoder1(tokens_list, resident_tokens_list, x_in)  # (B, 6, 256, 256)
 
         tokens_list = self.token_subnet2(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        out2 = self.token_decoder2(tokens_list, resident_tokens_list)  # (B, 6, 256, 256)
+        out2 = self.token_decoder2(tokens_list, resident_tokens_list, x_in)  # (B, 6, 256, 256)
 
         tokens_list = self.token_subnet3(tokens_list)  # (B, ref_H*ref_W, embed_dim)
-        out3 = self.token_decoder3(tokens_list, resident_tokens_list)  # (B, 6, 256, 256)
+        out3 = self.token_decoder3(tokens_list, resident_tokens_list, x_in)  # (B, 6, 256, 256)
 
         outs = [out0,out1,out2,out3]
         

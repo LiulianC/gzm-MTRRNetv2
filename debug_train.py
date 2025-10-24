@@ -6,30 +6,18 @@ from dataset.new_dataset1 import DSRTestDataset, HyperKDataset
 from torch.utils.data import ConcatDataset
 import math
 import warnings
+from option import build_debug_opts, get_lr_map, build_optimizer_and_scheduler
 
 warnings.filterwarnings('ignore')
 
-# 配置参数
-class DebugOpts:
-    def __init__(self):
-        self.data_root = './data'
-        self.model_dir = './model'
-        self.save_dir = './results'
-        self.batch_size = 4
-        self.shuffle = True
-        self.num_workers = 0
-        self.enable_finetune = False
-        self.model_path = './model_fit/model_latest.pth'
-        self.model_path = None
-        self.always_print = 1  # 总是打印所有层
+# 配置参数改为由 option.py 提供，便于集中管理
+opts = build_debug_opts()
 
-opts = DebugOpts()
 
-LearnRate = 1e-3
 
 # 运行3个训练步骤
 step = 0
-max_steps = 10
+max_steps = 30
 
 # 设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -196,23 +184,15 @@ print(f"Dataset loaded: {len(train_data)} samples")
 # 损失函数
 loss_function = CustomLoss().to(device)
 
-# 优化器 - 为不同模块设置差异化学习率
-# token_encoder.encoder_unit0/1/2 和 token_encoder.patchembed: 1e-3
-# token_subnet1/2/3: 1e-4
-# token_decoder: 1e-4
-param_groups = []
+
+
+
+
+
 
 # 模块名称到学习率的映射
-LearnRate = 1e-4
-
-# lr_base = 5e-3, gamma = 0.93
-lr_map = {
-    # ---- 头（heads）----
-    'token_decoder3': 1.0e-04,  # 最终输出头（×4）
-    'token_decoder2': 1.0e-04,  # 中间头（×3）
-    'token_decoder1': 1.0e-04,  # 中间头（×3）
-    'token_decoder0': 1.0e-04,  # 早期头（= base）
-}
+LearnRate = opts.base_lr
+lr_map = get_lr_map('Train')
 # lr_map = {
 #     # ---- 头（heads）----
 #     'token_decoder3': 2.000000e-02,  # 最终输出头（×4）
@@ -257,70 +237,8 @@ lr_map = {
 
 
 
-
-# 为每个模块分别收集参数
-module_params = {k: {'decay': [], 'no_decay': []} for k in lr_map.keys()}
-module_params['other'] = {'decay': [], 'no_decay': []}
-
-for n, p in model.netG_T.named_parameters():
-    if not p.requires_grad:
-        continue
-    
-    # 判断是否需要权重衰减
-    need_decay = not ((p.dim() == 1 and 'weight' in n) or any(x in n.lower() for x in ['raw_gamma', 'norm', 'bn', 'running_mean', 'running_var']))
-    
-    # 找到参数所属的模块
-    matched = False
-    for module_name in lr_map.keys():
-        if n.startswith(module_name):
-            if need_decay:
-                module_params[module_name]['decay'].append(p)
-            else:
-                module_params[module_name]['no_decay'].append(p)
-            matched = True
-            break
-    
-    # 其他模块使用默认学习率 LearnRate
-    if not matched:
-        if need_decay:
-            module_params['other']['decay'].append(p)
-        else:
-            module_params['other']['no_decay'].append(p)
-
-# 构建优化器参数组
-for module_name, lr in lr_map.items():
-    if module_params[module_name]['decay']:
-        param_groups.append({
-            'params': module_params[module_name]['decay'],
-            'lr': lr,
-            'weight_decay': 1e-4,
-            'name': f'{module_name}_decay'
-        })
-    if module_params[module_name]['no_decay']:
-        param_groups.append({
-            'params': module_params[module_name]['no_decay'],
-            'lr': lr,
-            'weight_decay': 0.0,
-            'name': f'{module_name}_no_decay'
-        })
-
-# 其他模块使用默认学习率
-if module_params['other']['decay']:
-    param_groups.append({
-        'params': module_params['other']['decay'],
-        'lr': LearnRate,
-        'weight_decay':0.0,
-        'name': 'other_decay'
-    })
-if module_params['other']['no_decay']:
-    param_groups.append({
-        'params': module_params['other']['no_decay'],
-        'lr': LearnRate,
-        'weight_decay': 0.0,
-        'name': 'other_no_decay'
-    })
-
-optimizer = torch.optim.Adam(param_groups, betas=(0.5, 0.999), eps=1e-8)
+# 使用集中构建的优化器与调度器（调度器可选，调试模式一般不用 step）
+optimizer, scheduler, lr_map, group_stats = build_optimizer_and_scheduler(model.netG_T, opts, profile='debug')
 
 if opts.model_path and os.path.exists(opts.model_path):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

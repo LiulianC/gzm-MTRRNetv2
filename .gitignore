@@ -24,3 +24,5 @@ draw
 done-blocks
 mamba-whl
 hist_match_results
+infer_outputs
+*.mp4
