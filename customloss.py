@@ -182,7 +182,7 @@ class CustomLoss(torch.nn.Module):
         }
         
         # 返回的仍然是相同格式，但vgg_loss已经除以10了
-        return loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, total_loss
+        return loss_table, mse_loss, vgg_loss, ssim_loss, loss_spr, total_loss
 
     def compute_perceptual_loss(self, x, y):
         """
