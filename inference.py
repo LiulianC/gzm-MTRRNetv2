@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from dataset.new_dataset1 import HyperKDataset_Test
+from torch.utils.data import ConcatDataset
+from dataset.new_dataset1 import HyperKDataset_Test,DSRTestDataset
 from MTRRNet import MTRREngine
 from option import build_train_opts
 from torchvision.utils import make_grid
@@ -54,22 +55,29 @@ def main():
     device = torch.device(args.device)
 
     # Dataset & Loader
-    HyperKroot_test = "/home/gzm/gzm-compare/dataset/JPEGImagesUnzip"
-    HyperKJson_test = "/home/gzm/gzm-compare/dataset/train.json"
-    dataset = HyperKDataset_Test(
-        root=HyperKroot_test,
-        json_path=HyperKJson_test,
-        start=000,
-        end=342, 
-        size=6000,
-        enable_transforms=False,
-        unaligned_transforms=False,
-        if_align=True,
-        HW=[256, 256],
-        flag=None,
-        SamplerSize=False,
-        color_jitter=False,
-    )
+    # HyperKroot_test = "/home/gzm/gzm-compare/dataset/JPEGImagesUnzip"
+    # HyperKJson_test = "/home/gzm/gzm-compare/dataset/train.json"
+    # dataset = HyperKDataset_Test(
+    #     root=HyperKroot_test,
+    #     json_path=HyperKJson_test,
+    #     start=000,
+    #     end=342, 
+    #     size=6000,
+    #     enable_transforms=False,
+    #     unaligned_transforms=False,
+    #     if_align=True,
+    #     HW=[256, 256],
+    #     flag=None,
+    #     SamplerSize=False,
+    #     color_jitter=False,
+    # )
+
+    tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
+    tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=800, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True, color_match=False)
+    test_data_dir1 = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
+    test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=200, SamplerSize=False, color_match=False)
+    dataset = ConcatDataset([tissue_data,test_data1])
+    
     loader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=0, pin_memory=True)
 
 
