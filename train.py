@@ -69,7 +69,7 @@ tissue_gen = '/home/gzm/gzm-MTRRVideo/data/tissue_gen'
 tissue_gen_data = DSRTestDataset(datadir=tissue_gen, fns='/home/gzm/gzm-MTRRVideo/data/tissue_gen_index/train1.txt',size=opts.sampler_size2, enable_transforms=False,if_align=True,real=False, HW=[256,256])
 
 tissue_dir = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], SamplerSize=True, color_match=False)
+tissue_data = DSRTestDataset(datadir=tissue_dir,fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/train1.txt',size=opts.sampler_size3, enable_transforms=True, unaligned_transforms=False, if_align=True,real=True, HW=[256,256], color_match=False)
 
 VOCroot = "/home/gzm/gzm-RDNet1/dataset/VOC2012"
 VOCjson_file = "/home/gzm/gzm-RDNet1/dataset/VOC2012/VOC_results_list.json"
@@ -77,7 +77,7 @@ VOCdataset = VOCJsonDataset(VOCroot, VOCjson_file, size=opts.sampler_size4, enab
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=True, color_jitter=False)
+HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, end=369, size=opts.sampler_size5, enable_transforms=True, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
@@ -86,7 +86,7 @@ train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_siz
 
 
 test_data_dir1 = '/home/gzm/gzm-MTRRVideo/data/tissue_real'
-test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], SamplerSize=False, color_match=False)
+test_data1 = DSRTestDataset(datadir=test_data_dir1, fns='/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[0], color_match=False)
 
 test_data_dir2 = '/home/gzm/gzm-MTRRVideo/data/hyperK_000'
 test_data2 = TestDataset(datadir=test_data_dir2, fns='/home/gzm/gzm-MTRRVideo/data/hyperK_000_list.txt', enable_transforms=False, if_align=True, real=True, HW=[256,256], size=opts.test_size[1])
@@ -100,15 +100,15 @@ VOCdataset1 = VOCJsonDataset(VOCroot1, VOCjson_file1, size=opts.test_size[3], en
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=370, size=opts.test_size[4], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False)
+HyperK_data_test = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=369, end=370, size=opts.test_size[4], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
 
 HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
-HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=371, end=372, size=opts.test_size[5], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False)
+HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=371, end=372, size=opts.test_size[5], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
 
 HyperKroot_test = "/home/gzm/gzm-compare/dataset/JPEGImages"
 HyperKJson_test = "/home/gzm/gzm-compare/dataset/train.json"
-HyperK_data_test3 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=0, end=342, size=opts.test_size[6], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False)
+HyperK_data_test3 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=0, end=342, size=opts.test_size[6], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
 
 # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
@@ -201,6 +201,12 @@ if __name__ == '__main__':
         print(" train data length: {} batch size: {}".format((len(train_loader))*opts.batch_size, opts.batch_size))
         model.train()
 
+        # 加载新数据 DSRTestDataset 和 HyperKDataset 支持动态采样
+        if i%5 == 0:
+            train_data.datasets[0].SampleNewItems()
+            train_data.datasets[4].SampleNewItems()
+        
+
         total_train_loss=0
         train_pbar = tqdm(
             train_loader,
@@ -210,7 +216,8 @@ if __name__ == '__main__':
             dynamic_ncols=False,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
         )      
-   
+
+        
 
         # 累计器
         epoch_loss_sum = {}     # 每个loss的总和

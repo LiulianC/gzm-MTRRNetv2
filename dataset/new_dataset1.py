@@ -16,6 +16,7 @@ from dataset.image_folder import make_dataset
 from dataset.torchdata import Dataset as BaseDataset
 from dataset.transforms import to_tensor
 from torch.utils.data import Sampler
+from torch.utils.data import DataLoader
 
 # 按目标宽度等比缩放图像，保持宽高比，调整高度为最接近的偶数
 def __scale_width(img, target_width):
@@ -281,7 +282,7 @@ class DSRDataset(BaseDataset):
 # size：限制加载的数据量 当size=0时 len=0 数据集程序会当成index_out错误自动停止
 class DSRTestDataset(BaseDataset):
     def __init__(self, datadir, fns=None, size=None, enable_transforms=False, unaligned_transforms=False,
-                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256], SamplerSize=False,
+                 round_factor=1, flag=None, if_align=True, real=False, HW=[256,256],
                  color_match=False, color_jitter=False):
         super(DSRTestDataset, self).__init__()
         self.size = size
@@ -331,34 +332,7 @@ class DSRTestDataset(BaseDataset):
                     self.R_paths.append((os.path.join(self.datadir, R)))
         
         
-        # if size == 0:
-        #     self.I_paths_s = []
-        #     self.T_paths_s = []
-        #     self.R_paths_s = []
-
-        # elif size is not None and size<=len(self.I_paths): # 如果有size控制，那截取size个元素,而且是随机截取
-        #     zipped = list(zip(self.I_paths,self.T_paths,self.R_paths))
-        #     sampled_tuples = random.sample(zipped, size)
-        #     self.I_paths_s,self.T_paths_s,self.R_paths_s=zip(*sampled_tuples)
-        # else:
-        #     self.I_paths_s,self.T_paths_s,self.R_paths_s=self.I_paths,self.T_paths,self.R_paths
-
-        if size == 0:
-            self.I_paths_s, self.T_paths_s, self.R_paths_s = [], [], []
-        elif size is not None and size <= len(self.I_paths) and SamplerSize:
-            # 如果需要随机抽样
-            zipped = list(zip(self.I_paths, self.T_paths, self.R_paths))
-            sampled = random.sample(zipped, size)
-            self.I_paths_s, self.T_paths_s, self.R_paths_s = zip(*sampled)
-        elif size is not None and size > 0 and size <= len(self.I_paths):
-            # 在0~最大长度范围内平均采样size个样本
-            total_length = len(self.I_paths)
-            indices = np.linspace(0, total_length - 1, size, dtype=int)
-            self.I_paths_s = [self.I_paths[i] for i in indices]
-            self.T_paths_s = [self.T_paths[i] for i in indices]
-            self.R_paths_s = [self.R_paths[i] for i in indices]
-        else:
-            self.I_paths_s,self.T_paths_s,self.R_paths_s=self.I_paths,self.T_paths,self.R_paths
+        self.SampleNewItems()
 
     def align(self, x1, x2, x3):
         h, w = self.HW[0], self.HW[1]
@@ -421,6 +395,36 @@ class DSRTestDataset(BaseDataset):
             return min(len(self.I_paths), self.size)
         else:
             return len(self.I_paths)
+
+    def SampleNewItems(self):
+        '''
+            每几个epoches从全部数据库重新采样指定数量的数据 为了数据多样性
+        '''
+        # 随机抽样
+        if self.size == 0:
+            self.I_paths_s,self.T_paths_s,self.R_paths_s= [], [], []
+            pass
+
+        elif self.size is not None and self.size > 0 and self.size <= len(self.I_paths):
+            total_length = len(self.I_paths)
+            step = total_length // self.size
+            
+            # 在0到step-1之间随机选择起始点
+            start_index = np.random.randint(0, step)
+            
+            # 生成等距采样索引
+            indices = [start_index + i * step for i in range(self.size)]
+            
+            # 确保索引不越界
+            indices = [i if i < total_length else i - total_length for i in indices]
+            
+            # 应用采样到两个路径列表
+            self.I_paths_s = [self.I_paths[i] for i in indices]
+            self.T_paths_s = [self.T_paths[i] for i in indices]
+            self.R_paths_s = [self.R_paths[i] for i in indices]
+
+        else:
+            self.I_paths_s,self.T_paths_s,self.R_paths_s=self.I_paths,self.T_paths,self.R_paths
 
     # --- 工具：RGB 直方图匹配 ---
     def _hist_match_rgb(self, src_img: Image.Image, ref_img: Image.Image, bins: int = 256) -> Image.Image:
@@ -745,7 +749,7 @@ class VOCJsonDataset(Dataset):
 class HyperKDataset(Dataset):
     def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
                  enable_transforms=False, unaligned_transforms=False,
-                 if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False):
+                 if_align=True, HW=[256,256], flag=None, color_jitter=False):
         super(HyperKDataset, self).__init__()
         self.root = root
         self.start = start
@@ -794,22 +798,7 @@ class HyperKDataset(Dataset):
                 else:
                     print(f"⚠️ 没找到匹配的标签: {label_path}")
 
-        # 随机抽样
-        if size == 0:
-            self.I_paths, self.T_paths = [], []
-        elif size is not None and size <= len(self.I_paths) and SamplerSize:
-            # 如果需要随机抽样
-            zipped = list(zip(self.I_paths, self.T_paths))
-            sampled = random.sample(zipped, size)
-            self.I_paths, self.T_paths = zip(*sampled)
-        elif size is not None and size > 0 and size <= len(self.I_paths):
-            # 在0~最大长度范围内平均采样size个样本
-            total_length = len(self.I_paths)
-            indices = np.linspace(0, total_length - 1, size, dtype=int)
-            self.I_paths = [self.I_paths[i] for i in indices]
-            self.T_paths = [self.T_paths[i] for i in indices]
-        else:
-            self.I_paths, self.T_paths = self.I_paths, self.T_paths
+        self.SampleNewItems()
 
     def align(self, x1, x2, x3):
         h, w = self.HW
@@ -820,10 +809,10 @@ class HyperKDataset(Dataset):
         return x1, x2, x3
 
     def __getitem__(self, index):
-        filename = os.path.basename(self.I_paths[index]).replace(".png", "")
+        filename = os.path.basename(self.I_paths_S[index]).replace(".png", "")
 
-        m_img = Image.open(self.I_paths[index]).convert("RGB")
-        t_img = Image.open(self.T_paths[index]).convert("RGB")
+        m_img = Image.open(self.I_paths_S[index]).convert("RGB")
+        t_img = Image.open(self.T_paths_S[index]).convert("RGB")
         r_img = Image.fromarray(np.clip(np.array(m_img, dtype=np.float32) - np.array(t_img, dtype=np.float32), 0, 255).astype(np.uint8))
 
         if self.enable_transforms:
@@ -850,11 +839,54 @@ class HyperKDataset(Dataset):
 
     def __len__(self):
         return len(self.I_paths)
+    
+    def SampleNewItems(self):
+        '''
+            每几个epoches从全部数据库重新采样指定数量的数据 为了数据多样性
+        '''
+        # 随机抽样
+        if self.size == 0:
+            self.I_paths_S, self.T_paths_S = [], []
+            pass
+
+        elif self.size is not None and self.size > 0 and self.size <= len(self.I_paths):
+            total_length = len(self.I_paths)
+            step = total_length // self.size
+            
+            # 在0到step-1之间随机选择起始点
+            start_index = np.random.randint(0, step)
+            
+            # 生成等距采样索引
+            indices = [start_index + i * step for i in range(self.size)]
+            
+            # 确保索引不越界
+            indices = [i if i < total_length else i - total_length for i in indices]
+            
+            # 应用采样到两个路径列表
+            self.I_paths_S = [self.I_paths[i] for i in indices]
+            self.T_paths_S = [self.T_paths[i] for i in indices]
+
+        else:
+            self.I_paths_S= self.I_paths
+            self.T_paths_S= self.T_paths
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 class HyperKDataset_Test(Dataset):
     def __init__(self, root="./EndoData", json_path=None, start=343, end=372, size=None,
                  enable_transforms=False, unaligned_transforms=False,
-                 if_align=True, HW=[256,256], flag=None, SamplerSize=False, color_jitter=False):
+                 if_align=True, HW=[256,256], flag=None, color_jitter=False):
         # 修正父类初始化，避免 super(type, obj) 传入不相关类型导致的 TypeError
         super(HyperKDataset_Test, self).__init__()
         self.root = root
@@ -900,23 +932,7 @@ class HyperKDataset_Test(Dataset):
                 else:
                     print(f"⚠️ input未找到: {input_path}")
 
-
-
-
-        # 随机抽样
-        if size == 0:
-            self.I_paths = []
-        elif size is not None and size <= len(self.I_paths) and SamplerSize:
-            # 如果需要随机抽样
-            zipped = list(self.I_paths)
-            self.I_paths = random.sample(zipped, size)
-        elif size is not None and size > 0 and size <= len(self.I_paths):
-            # 在0~最大长度范围内平均采样size个样本
-            total_length = len(self.I_paths)
-            indices = np.linspace(0, total_length - 1, size, dtype=int)
-            self.I_paths = [self.I_paths[i] for i in indices]
-        else:
-            self.I_paths= self.I_paths
+        self.SampleNewItems()
 
 
     def align(self, x1, x2, x3):
@@ -928,9 +944,9 @@ class HyperKDataset_Test(Dataset):
         return x1, x2, x3
 
     def __getitem__(self, index):
-        filename = os.path.basename(self.I_paths[index]).replace(".png", "")
+        filename = os.path.basename(self.self.I_paths_S[index]).replace(".png", "")
 
-        m_img = Image.open(self.I_paths[index]).convert("RGB")   
+        m_img = Image.open(self.self.I_paths_S[index]).convert("RGB")   
 
         m_img = m_img.resize((256,256))   
 
@@ -941,9 +957,31 @@ class HyperKDataset_Test(Dataset):
         return dic
 
     def __len__(self):
-        return len(self.I_paths)
+        return len(self.self.I_paths_S)
+    
+    
+    def SampleNewItems(self):
+        '''
+            每几个epoches从全部数据库重新采样指定数量的数据 为了数据多样性
+        '''
+        # 随机抽样
+        if self.size == 0:
+            self.I_paths_S = []
+            pass
 
-# 放在类 HyperKDataset 内部
+        elif self.size is not None and self.size > 0 and self.size <= len(self.I_paths):
+            # 随机开头的等距抽样 保证整体覆盖性
+            total_length = len(self.I_paths)
+            step = total_length // self.size
+            start_index = np.random.randint(0, step)
+            indices = [(start_index + i * step) % total_length for i in range(self.size)]
+            self.I_paths_S = [self.I_paths[i] for i in indices]
+
+        else:
+            self.I_paths_S= self.I_paths
+
+
+
 def _maybe_color_jitter(m_img, t_img, r_img,
                         p=0.8,
                         brightness=0.2, contrast=0.2, saturation=0.3, hue=0.05,
@@ -991,3 +1029,6 @@ def _maybe_color_jitter(m_img, t_img, r_img,
         r_img = Image.fromarray(r_np)
 
     return m_img, t_img, r_img
+
+
+    
