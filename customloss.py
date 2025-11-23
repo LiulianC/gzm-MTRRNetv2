@@ -59,10 +59,10 @@ class CustomLoss(torch.nn.Module):
         self.all_img_weight = 0
 
         # 对于残留反光区域的权重
-        self.spr_loss_weight = 1.0
+        self.spr_loss_weight = 40
 
         # fake_Ts范围软约束正则项权重
-        self.fake_Ts_range_weight = 0.2
+        self.fake_Ts_range_weight = 0.01
 
     def forward(self, fake_Ts, label1, input_image, rcmaps, fake_Rs, label2):
 
