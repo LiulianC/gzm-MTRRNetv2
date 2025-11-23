@@ -6,18 +6,18 @@ from dataset.new_dataset1 import DSRTestDataset, HyperKDataset
 from torch.utils.data import ConcatDataset
 import math
 import warnings
-from option import build_debug_opts, get_lr_map, build_optimizer_and_scheduler
+from option import get_lr_map, build_optimizer_and_scheduler, build_train_opts
 
 warnings.filterwarnings('ignore')
 
 # 配置参数改为由 option.py 提供，便于集中管理
-opts = build_debug_opts()
+opts = build_train_opts()
 
 
 
 # 运行3个训练步骤
 step = 0
-max_steps = 30
+max_steps = 3
 
 # 设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -149,7 +149,6 @@ tissue_data = DSRTestDataset(
     if_align=True,
     real=True,
     HW=[256, 256],
-    SamplerSize=True
 )
 
 HyperKroot = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
@@ -165,14 +164,13 @@ HyperK_data = HyperKDataset(
     if_align=True,
     HW=[256, 256],
     flag=None,
-    SamplerSize=True,
     color_jitter=True
 )
 
 train_data = ConcatDataset([tissue_data, HyperK_data])
 train_loader = torch.utils.data.DataLoader(
     train_data,
-    batch_size=opts.batch_size,
+    batch_size=opts.batch_size_train,
     shuffle=opts.shuffle,
     num_workers=opts.num_workers,
     drop_last=False,
