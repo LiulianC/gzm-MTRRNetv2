@@ -29,7 +29,8 @@ from psdLoss.spec_loss_pack import SpecularityNetLossPack
 
 warnings.filterwarnings('ignore')
 opts = build_train_opts()
-opts.batch_size = 4
+opts.batch_size_train = opts.batch_size_train
+opts.batch_size_test = opts.batch_size_test
 opts.shuffle = True
 opts.display_id = -1  
 opts.num_workers = 0
@@ -81,7 +82,7 @@ HyperK_data = HyperKDataset(root=HyperKroot, json_path=HyperKJson, start=343, en
 
 # 使用ConcatDataset方法合成数据集 能自动跳过空数据集
 train_data = ConcatDataset([fit_data, tissue_gen_data, tissue_data, VOCdataset, HyperK_data])
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size, shuffle=opts.shuffle, num_workers = opts.num_workers, drop_last=False, pin_memory=True)
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=opts.batch_size_train, shuffle=opts.shuffle, num_workers = opts.num_workers, drop_last=False, pin_memory=True)
 
 
 
@@ -106,14 +107,10 @@ HyperKroot_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData"
 HyperKJson_test = "/home/gzm/gzm-MTRRNetv2/data/EndoData/test.json"
 HyperK_data_test2 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=371, end=372, size=opts.test_size[5], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
 
-HyperKroot_test = "/home/gzm/gzm-compare/dataset/JPEGImages"
-HyperKJson_test = "/home/gzm/gzm-compare/dataset/train.json"
-HyperK_data_test3 = HyperKDataset(root=HyperKroot_test, json_path=HyperKJson_test, start=0, end=342, size=opts.test_size[6], enable_transforms=False, unaligned_transforms=False, if_align=True, HW=[256,256], flag=None, color_jitter=False)
-
 # print("test data size: {}, {}, {}, {}, {}".format(len(test_data1), len(test_data2), len(test_data3), len(VOCdataset1), len(HyperK_data_test)))
 
-test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test, HyperK_data_test2, HyperK_data_test3])
-test_loader = torch.utils.data.DataLoader(test_data, batch_size=4, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
+test_data = ConcatDataset([test_data1, test_data2, test_data3, VOCdataset1, HyperK_data_test, HyperK_data_test2])
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=opts.batch_size_test, shuffle=False, num_workers=opts.num_workers, drop_last=False, pin_memory=True)
 
 
 
@@ -198,11 +195,11 @@ if __name__ == '__main__':
     for i in range(epoch_start_num, opts.epoch):
         t1 = time.time()
         print("-----------第{}轮训练开始-----------".format(i + 1))
-        print(" train data length: {} batch size: {}".format((len(train_loader))*opts.batch_size, opts.batch_size))
+        print(" train data length: {} batch size: {}".format((len(train_loader))*opts.batch_size_train, opts.batch_size_train))
         model.train()
 
         # 加载新数据 DSRTestDataset 和 HyperKDataset 支持动态采样
-        if i%5 == 0:
+        if i % 5 == 0:
             train_data.datasets[0].SampleNewItems()
             train_data.datasets[4].SampleNewItems()
         
@@ -223,7 +220,7 @@ if __name__ == '__main__':
         epoch_loss_sum = {}     # 每个loss的总和
         epoch_step_count = 0
         train_loss_total = 0
-
+        print('\n')
         print('current time:',datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
         for t, data1 in enumerate(train_pbar):
             # print('\n')
@@ -256,7 +253,7 @@ if __name__ == '__main__':
             _, _, _, _, _, all_loss0 = loss_function(train_fake_Ts[0], train_label1, train_ipt, train_rcmaps, train_fake_Rs[0], train_label2)
             _, _, _, _, _, all_loss1 = loss_function(train_fake_Ts[1], train_label1, train_ipt, train_rcmaps, train_fake_Rs[1], train_label2)
             _, _, _, _, _, all_loss2 = loss_function(train_fake_Ts[2], train_label1, train_ipt, train_rcmaps, train_fake_Rs[2], train_label2)
-            loss_table, mse_loss, vgg_loss, ssim_loss, fake_Ts_range_penalty, all_loss3 = loss_function(train_fake_Ts[3], train_label1, train_ipt, train_rcmaps, train_fake_Rs[3], train_label2)
+            loss_table, mse_loss, vgg_loss, ssim_loss, loss_spr, all_loss3 = loss_function(train_fake_Ts[3], train_label1, train_ipt, train_rcmaps, train_fake_Rs[3], train_label2)
 
             # all_loss0, _ = PSD_LossFunc.compute_total(train_fake_Rs[0], train_label1)
             # all_loss1, _ = PSD_LossFunc.compute_total(train_fake_Rs[1], train_label1)
@@ -301,7 +298,7 @@ if __name__ == '__main__':
             
             total_train_step += 1
 
-            if i % 3 == 0 and (total_train_step % (len(train_loader)//20)) == 0 and i<11:
+            if i % 3 == 0 and i<11 and total_train_step%10==0:
 
                 save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=train_input.size(0))
                 save_image(visuals['fake_Rs'][-1], os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=train_input.size(0))
@@ -317,7 +314,7 @@ if __name__ == '__main__':
                 save_path = os.path.join(output_dir7, f'epoch{i}+{total_train_step}-loss{all_loss:.4g}train_grid.png')
                 save_image(grid_all, save_path)
 
-            elif i%10==0 and (total_train_step % (len(train_loader)//10)) == 0 :
+            elif i%10 == 0 and total_train_step%10==0:
 
                 save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=train_input.size(0))
                 save_image(visuals['fake_Rs'][-1], os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=train_input.size(0))
@@ -340,7 +337,7 @@ if __name__ == '__main__':
             #     model.apply_weight_constraints()
 
 
-            train_pbar.set_postfix({'loss':all_loss.item(),'mseloss':mse_loss.item(), 'vggloss':vgg_loss.item(), 'ssimloss':ssim_loss.item(),'rangeloss':fake_Ts_range_penalty.item(),'current_lr': current_lr})
+            train_pbar.set_postfix({'loss':all_loss.item(),'mseloss':mse_loss.item(), 'vggloss':vgg_loss.item(), 'ssimloss':ssim_loss.item(),'loss_spr':loss_spr.item(),'current_lr': current_lr})
             # train_pbar.set_postfix({'loss':all_loss.item(),'pixeloss':loss_table['pixel'].item(),'current_lr': current_lr})
             train_pbar.update(1)
         train_pbar.close()
@@ -364,7 +361,7 @@ if __name__ == '__main__':
         model.eval()
         with torch.no_grad():
             with eval_no_dropout(model):
-                print("test data length: {} batch size: {}".format(len(test_data),opts.batch_size))
+                print("test data length: {} batch size: {}".format(len(test_data),opts.batch_size_test))
                 test_pbar = tqdm(
                     test_loader,
                     desc="Validating",
@@ -402,7 +399,7 @@ if __name__ == '__main__':
 
                     total_test_loss += loss.item()
 
-
+ 
 
                     if opts.color_enhance:
                         test_fake_Ts[-1] = hist_match_batch_tensor(test_fake_Ts[-1], test_imgs)

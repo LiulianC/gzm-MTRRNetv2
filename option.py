@@ -10,7 +10,7 @@ def _need_weight_decay(param_name: str, p: torch.nn.Parameter) -> bool:
     if any(x in param_name.lower() for x in no_decay_flags):
         return False
     return True
-
+ 
 
 def build_train_opts(argv=None):
     """
@@ -19,7 +19,7 @@ def build_train_opts(argv=None):
     """
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--data_root', type=str, default='./data')
-    parser.add_argument('--model_dir', type=str, default='./model', help='the model dir')
+    parser.add_argument('--model_dir', type=str, default='./model_fit', help='the model dir')
     parser.add_argument('--save_dir', type=str, default='./results', help='the results saving dir')
     parser.add_argument('--host', type=str, default='127.0.0.1')
     parser.add_argument('--port', type=int, default=57117)
@@ -29,27 +29,41 @@ def build_train_opts(argv=None):
     opts = parser.parse_args(argv)
 
     # Post-populate attributes to match train.py behavior
-    opts.batch_size = 4
+    opts.batch_size_train = 8
+    opts.batch_size_test = 4
+
     opts.shuffle = True
-    opts.display_id = -1
+    opts.display_id = -1 
     opts.num_workers = 0
 
     opts.always_print = 0
     opts.debug_monitor_layer_stats = 1
     opts.debug_monitor_layer_grad = 1
 
+    opts.training = False
+    
     opts.epoch = 300
-    opts.sampler_size1 = 0
-    opts.sampler_size2 = 0
-    opts.sampler_size3 = 8
-    opts.sampler_size4 = 0
-    opts.sampler_size5 = 12
-    # Default test sizes (7 partitions used in train.py)
-    opts.test_size = [200, 0, 0, 0, 200, 200]
+    opts.es_patience = 20
+    if opts.training:
+        opts.sampler_size1 = 0
+        opts.sampler_size2 = 0
+        opts.sampler_size3 = 800
+        opts.sampler_size4 = 0
+        opts.sampler_size5 = 1200
+        opts.test_size = [200, 0, 0, 0, 200, 200, 0]
+    else:
+        opts.sampler_size1 = 0
+        opts.sampler_size2 = 0
+        opts.sampler_size3 = 8
+        opts.sampler_size4 = 0
+        opts.sampler_size5 = 12
+        opts.test_size = [200, 0, 0, 0, 0, 0, 0]
 
     # Model loading/reset flags
-    # opts.model_path = None
-    opts.model_path = './model_fit/model_62_best1.pth'
+    # opts.model_path = './model_62_best1.pth'
+    opts.model_path = None
+    opts.model_path = './model_fit/model_latest.pth'
+    # opts.model_path = './model_fit/model_240.pth'
     opts.reset_best = False
     opts.base_lr = 1e-4
 
@@ -65,32 +79,6 @@ def build_train_opts(argv=None):
 
     return opts
 
-
-def build_debug_opts():
-    """
-    Build a minimal set of options for debug_train.py consistent with its current usage.
-    """
-    opts = SimpleNamespace()
-    opts.data_root = './data'
-    opts.model_dir = './model_fit'
-    opts.save_dir = './results'
-    opts.batch_size = 4
-    opts.shuffle = True
-    opts.num_workers = 0
-    
-    opts.model_path = './model_fit/model_62_best1.pth'
-    # opts.model_path = None
-
-    # Also include flags used by monitor helpers when present
-    opts.always_print = 0
-    opts.debug_monitor_layer_stats = 0
-    opts.debug_monitor_layer_grad = 0
-    
-    # Add base LR for consistency with train
-    if not hasattr(opts, 'base_lr'):
-        opts.base_lr = 1.0e-4
-
-    return opts
 
 
 def get_lr_map(profile: str = 'train'):
