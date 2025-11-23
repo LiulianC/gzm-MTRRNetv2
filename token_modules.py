@@ -427,7 +427,7 @@ class Mamba2Blocks_Standard(nn.Module):
 
         # === Mamba1 配置 ===
         ssm_cfg={
-            "layer": "Mamba1",    # 指定使用Mamba2
+            "layer": "Mamba1",    # 指定使用Mamba1
             # 其他Mamba1参数（可选）
             "d_state": 16,       # SSM状态维度
             "d_conv": 4,          # 卷积核大小
@@ -437,8 +437,7 @@ class Mamba2Blocks_Standard(nn.Module):
         layer_scale_init: float = None,
         layer_scale_max: float = None,
 
-
-        # # # === Mamba2 配置 ===
+        # # === Mamba2 配置 ===（已注释）
         # ssm_cfg={
         #     "layer": "Mamba2",    # 指定使用Mamba2
         #     # 稳定性相关默认值（可被调用方覆盖）
@@ -461,8 +460,22 @@ class Mamba2Blocks_Standard(nn.Module):
         # layer_scale_init: float = 1e-4,
         # layer_scale_max: float = 1e-2,
 
-        attn_layer_idx=None,
-        attn_cfg=None,
+        # === MHA 配置 ===（交替使用MHA和Mamba）
+        attn_layer_idx=None,  # 设置为None，将在内部自动设置为奇数层索引
+        attn_cfg={
+            "num_heads": 8,           # 注意力头数
+            "num_heads_kv": None,     # key-value头数，默认同num_heads
+            "head_dim": None,         # 头维度，默认使用embed_dim // num_heads
+            "mlp_dim": 0,             # MLP维度，0表示无MLP
+            "qkv_proj_bias": True,    # QKV投影偏置
+            "out_proj_bias": True,    # 输出投影偏置
+            "softmax_scale": None,    # softmax缩放因子
+            "causal": False,          # 是否因果（自回归）
+            "d_conv": 0,              # 卷积维度，0表示无卷积
+            "rotary_emb_dim": 0,      # 旋转位置编码维度
+            "rotary_emb_base": 10000.0, # 旋转位置编码基数
+            "rotary_emb_interleaved": False, # 是否交错旋转位置编码
+        },
         norm_epsilon: float = 1e-5,
         rms_norm: bool = True,
         initializer_cfg=None,
@@ -472,13 +485,21 @@ class Mamba2Blocks_Standard(nn.Module):
         device='cuda',
         # 不强制使用 bfloat16，继承全局默认（通常为 FP32）；避免与优化器/其余模块 dtype 不一致导致的不稳定
         dtype=None,
-
         channel_first=False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
         self.channel_first = channel_first
+        self.n_layer = n_layer
+
+        self.Mamba_num = n_layer
+        if attn_cfg is not None:
+            self.Mamba_num = self.n_layer/2
+        self.Trans_num = self.n_layer - self.Mamba_num
+
+
+
 
         # We change the order of residual and layer norm:
         # Instead of LN -> Attn / MLP -> Add, we do:
@@ -486,30 +507,38 @@ class Mamba2Blocks_Standard(nn.Module):
         # the main branch (output of MLP / Mixer). The model definition is unchanged.
         # This is for performance reason: we can fuse add + layer_norm.
 
-
         self.fused_add_norm = fused_add_norm
         if self.fused_add_norm:
             if layer_norm_fn is None or rms_norm_fn is None:
                 raise ImportError("Failed to import Triton LayerNorm / RMSNorm kernels")
 
+        # 如果attn_layer_idx为None，自动设置为奇数层索引（实现交替使用）
+        if attn_layer_idx is None:
+            attn_layer_idx = [i for i in range(1, n_layer, 2)]  # 奇数层使用MHA
+        
+        # 确保attn_cfg包含必要的参数
+        if attn_cfg is None:
+            attn_cfg = {}
+        
+        # # 添加embed_dim参数到attn_cfg（MHA需要的第一个参数）
+        # attn_cfg_with_embed_dim = {"embed_dim": d_model}
+        # attn_cfg_with_embed_dim.update(attn_cfg)
+        
         # 合并默认稳定配置与外部传入的 ssm_cfg（外部优先）
         _default_ssm = {
-            "layer": "Mamba2",
+            "layer": "Mamba1",  # 使用Mamba1
             "d_state": 16,
             "d_conv": 4,
             "expand": 2,
-            # "rmsnorm": True,
-            # "norm_before_gate": True,
-            # "dt_min": 1e-3,
-            # "dt_max": 5e-2,
-            # "dt_init_floor": 1e-4,
-            # "dt_limit": (1e-4, 5e-1),
             "bias": False,
             "conv_bias": True,
         }
         _ssm_cfg_merged = dict(_default_ssm)
         if ssm_cfg is not None:
             _ssm_cfg_merged.update(ssm_cfg)
+
+        # 确保使用Mamba1
+        _ssm_cfg_merged["layer"] = "Mamba1"
 
         self.layers = nn.ModuleList(
             [
@@ -518,7 +547,7 @@ class Mamba2Blocks_Standard(nn.Module):
                     d_intermediate=d_intermediate,
                     ssm_cfg=_ssm_cfg_merged,
                     attn_layer_idx=attn_layer_idx,
-                    attn_cfg=attn_cfg,
+                    attn_cfg=attn_cfg,  # 使用包含embed_dim的配置
                     norm_epsilon=norm_epsilon,
                     rms_norm=rms_norm,
                     residual_in_fp32=residual_in_fp32,
@@ -529,6 +558,10 @@ class Mamba2Blocks_Standard(nn.Module):
                 for i in range(n_layer)
             ]
         )
+        
+        # 打印配置信息
+        print(f"模型配置: 总层数={n_layer}, MHA层索引={attn_layer_idx}")
+        print(f"交替模式: 偶数层(0,2,4...)使用Mamba1, 奇数层(1,3,5...)使用MHA")      
 
         # LayerScale stabilizes deep stacks by shrinking each block's update before it enters the
         # next residual addition. When set to a tiny value (default 1e-3) it tames the gradient norm
@@ -653,6 +686,9 @@ class SwinTokenBlock(nn.Module):
 
 
 
+
+
+
 class EncoderUnit(nn.Module):
     """单个尺度的Token处理阶段：频带分离→分别编码→融合（支持随机失活分支）"""
     def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, need_downsample=False):
@@ -771,7 +807,10 @@ class Encoder(nn.Module):
         
         self.encoder_unit1 = EncoderUnit(embed_dim=192, grid_size=32, ori_img_size=256, mamba_blocks=mamba_blocks[1], swin_blocks=swin_blocks[1], 
                                     window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=True)
-  
+
+        # self.downSample0 = nn.Conv2d(96, 192, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
+        # self.downSample1 = nn.Conv2d(192, 384, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
+
         self.encoder_unit2 = EncoderUnit(embed_dim=384, grid_size=16, ori_img_size=256, mamba_blocks=mamba_blocks[2], swin_blocks=swin_blocks[2], 
                                     window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True)
         
@@ -782,15 +821,26 @@ class Encoder(nn.Module):
         # x_in: (B, 3, 256, 256)
         tokens_list = []
         
-        x_emb = self.patchembed(x_in)  # (B, N, C)  N=4096 C=96
-        tokens_list.append(x_emb)
+        x_emb1 = self.patchembed(x_in)  # (B, N, C)  N=4096 C=96
+        tokens_list.append(x_emb1)
         
-        tokens = self.encoder_unit0(x_emb)  # (B, N, C)  N=64*64 C=96
+        tokens = self.encoder_unit0(x_emb1)  # (B, N, C)  N=64*64 C=96
         tokens_list.append(tokens)
 
         tokens = self.encoder_unit1(tokens)  # (B, N, C)  N=32*32 C=192
         tokens_list.append(tokens)
 
+
+
+        # B, N, C = x_emb1.shape
+        # x_emb1 = x_emb1.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))  # (B, C, H, W)  C=96 H=W=64
+        # x_emb2 = self.downSample0(x_emb1)  # (B, C, H, W)  C=192 H=W=32
+        # x_emb2 = self.downSample1(x_emb2)  # (B, C, H, W)  C=384 H=W=16
+        # B, C, H, W = x_emb2.shape
+        # x_emb2 = x_emb2.contiguous().view(B, C, H*W).permute(0,2,1)  # (B, N, C)  C=384 N=16*16
+        # tokens = self.encoder_unit2(x_emb2)  # (B, N, C)  N=16*16 C=384
+        
+        
         tokens = self.encoder_unit2(tokens)  # (B, N, C)  N=16*16 C=384
         tokens_list.append(tokens)
 
@@ -1308,7 +1358,7 @@ class UnifiedTokenDecoder(nn.Module):
                 resident_tokens_list[i] = res_tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
                 # (B C H W)
         else:
-            resident_tokens_list = resident_tokens_list
+            resident_tokens_list = resident_tokens_list 
             pass  # 已经是(B C H W)格式
 
         f0,f1,f2,f3 = tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
