@@ -394,7 +394,7 @@ class DSRTestDataset(BaseDataset):
         if self.size is not None:
             return min(len(self.I_paths), self.size)
         else:
-            return len(self.I_paths)
+            return len(self.I_paths_s)
 
     def SampleNewItems(self):
         '''
@@ -780,6 +780,7 @@ class HyperKDataset(Dataset):
             label_dir = os.path.join(root, folder_name, "label")
 
             if not os.path.exists(input_dir) or not os.path.exists(label_dir):
+                print(input_dir)
                 print(f"⚠️ 跳过 {folder_name}, input 或 label 不存在")
                 continue
 
@@ -838,7 +839,7 @@ class HyperKDataset(Dataset):
         return dic
 
     def __len__(self):
-        return len(self.I_paths)
+        return len(self.I_paths_S)
     
     def SampleNewItems(self):
         '''
