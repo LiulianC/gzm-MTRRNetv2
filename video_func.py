@@ -114,9 +114,9 @@ def evaluate_batch_model(frames, model, device, output_dir, fps=24, batch_size=8
                 img = Image.fromarray(arr)
                 results.append(img)
 
-                # 保存单帧
-                frame_path = os.path.join(frame_result_dir, f"frame_{start+idx:05d}.png")
-                img.save(frame_path)
+                # # 保存单帧
+                # frame_path = os.path.join(frame_result_dir, f"frame_{start+idx:05d}.png")
+                # img.save(frame_path)
 
     # 保存最终视频
     video_path = os.path.join(output_dir, "result.mp4")
