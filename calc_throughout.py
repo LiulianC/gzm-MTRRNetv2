@@ -21,7 +21,7 @@ def build_test_loader(
         datadir="/home/gzm/gzm-MTRRVideo/data/tissue_real",
         fns="/home/gzm/gzm-MTRRVideo/data/tissue_real_index/eval1.txt",
         enable_transforms=False, if_align=True, real=True,
-        HW=[img_size, img_size], size=test_size[0], SamplerSize=False
+        HW=[img_size, img_size], size=test_size[0], 
     )
 
     t2 = TestDataset(
@@ -50,7 +50,7 @@ def build_test_loader(
         start=369, end=372, size=test_size[4],
         enable_transforms=False, unaligned_transforms=False,
         if_align=True, HW=[img_size, img_size], flag=None,
-        SamplerSize=False, color_jitter=False
+        color_jitter=False
     )
 
     hk2 = HyperKDataset(
@@ -59,7 +59,7 @@ def build_test_loader(
         start=371, end=372, size=test_size[5],
         enable_transforms=False, unaligned_transforms=False,
         if_align=True, HW=[img_size, img_size], flag=None,
-        SamplerSize=False, color_jitter=False
+        color_jitter=False
     )
 
     test_data = ConcatDataset([t1, t2, t3, voc, hk1, hk2])
