@@ -1,372 +1,16 @@
 # MTRRNet: Mamba + Transformer for Reflection Removal in Endoscopy Images
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from collections import OrderedDict
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from classifier import PretrainedConvNext_e2e
 import math
 import tabulate
-import torch.utils.checkpoint as cp
-
-# padding是边缘复制 减少边框伪影
-class Conv2DLayer(nn.Sequential):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, norm=None, act=None, bias=False):
-        super(Conv2DLayer, self).__init__()
-
-        # Replication padding （复制边缘）
-        if padding > 0:
-            self.add_module('pad', nn.ReplicationPad2d(padding))  # [left, right, top, bottom] 都为 padding
-
-        # 卷积
-        self.add_module('conv2d', nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=0, dilation=dilation, groups=groups, bias=bias))
-
-        # 归一化
-        if norm is not None:
-            self.add_module('norm', norm(out_channels))
-
-        # 激活
-        if act is not None:
-            self.add_module('act', act)
-
-# Attention-Aware Fusion
-class AAF(nn.Module):
-    """
-    输入: List[Tensor], 每个 shape 为 [B, C, H, W]
-    输出: Tensor, shape 为 [B, C, H, W]
-    """
-    def __init__(self, in_channels, num_inputs): # in_channels 每个图像的通道 num_input 有多少个图像
-        super(AAF, self).__init__()
-        self.in_channels = in_channels
-        self.num_inputs = num_inputs
-        
-        # 输入 concat 后通道为 C*num_inputs
-        self.attn = nn.Sequential(
-            nn.Conv2d(num_inputs * in_channels, num_inputs * in_channels * 16, kernel_size=1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(num_inputs * in_channels * 16, num_inputs, kernel_size=1, bias=False),
-            nn.Softmax(dim=1)  # 对每个位置的 num_inputs 做归一化
-        )
-
-    def forward(self, features):
-        # features: list of Tensors [B, C, H, W]
-        B, C, H, W = features[0].shape
-        x = torch.cat(features, dim=1)  # shape: [B, C*num_inputs, H, W]
-        attn_weights = self.attn(x)     # shape: [B, num_inputs, H, W]
-        
-        # 融合：对每个尺度乘以权重后相加
-        out = 0
-        for i in range(self.num_inputs):
-            weight = attn_weights[:, i:i+1, :, :]  # [B,1,H,W]
-            out += features[i] * weight            # 广播乘法
-        return out
-
-# 多尺度拉普拉斯特征提取
-class LaplacianPyramid(nn.Module):
-    # filter laplacian LOG kernel, kernel size: 3.
-    # The laplacian Pyramid is used to generate high frequency images.
-
-    def __init__(self, device='cuda', dim=3):
-        super(LaplacianPyramid, self).__init__()
-
-        # 2D laplacian kernel (2D LOG operator).
-        self.channel_dim = dim
-        laplacian_kernel = np.array([[0, -1, 0],[-1, 4, -1],[0, -1, 0]])
-
-        laplacian_kernel = np.repeat(laplacian_kernel[None, None, :, :], dim, 0)  # (dim, 1, 3, 3)
-
-        # 可学习 kernel + 保存初值用于约束
-        self.kernel = torch.nn.Parameter(torch.FloatTensor(laplacian_kernel))
-        self.register_buffer('kernel_init', torch.FloatTensor(laplacian_kernel).clone())
-
-        # 允许偏离初值的带宽（越小越“像拉普拉斯”）
-        self.epsilon = 0.05
-
-        # 初始化时先夹一下，避免一开始就越界
-        with torch.no_grad():
-            self.kernel.data.clamp_(self.kernel_init - self.epsilon, self.kernel_init + self.epsilon)
-
-        # 给 kernel 挂梯度钩子：投影/截断不合规梯度，训练时每步都会生效
-        self.kernel.register_hook(self._lap_kernel_grad_hook)
-
-        self.aaf = AAF(3, 4)
-
-    def _lap_kernel_grad_hook(self, grad: torch.Tensor) -> torch.Tensor:
-        """
-        自定义反向传播（仅作用于 self.kernel 的梯度）：
-        1) 阻断把 kernel 推出 [init-eps, init+eps] 带的梯度方向
-        2) 去掉破坏“每个通道 3×3 权重零和”的梯度分量
-        3) 做一次温和的范数裁剪，稳住训练
-        """
-        if grad is None:
-            return grad
-
-        # 1) 局部带约束：已经到上界的元素，禁止继续“往外推”；到下界同理
-        with torch.no_grad():
-            over_upper = (self.kernel - self.kernel_init) >= self.epsilon  # 已到上界
-            under_lower = (self.kernel_init - self.kernel) >= self.epsilon  # 已到下界
-
-        # 对应方向的梯度清零（只清“继续往外”的方向）
-        blocked_up = over_upper & (grad > 0)
-        blocked_down = under_lower & (grad < 0)
-        grad = torch.where(blocked_up | blocked_down, torch.zeros_like(grad), grad)
-
-        # 2) 拉普拉斯零和约束：去掉每个(通道×组)的均值分量，避免整体偏移
-        # 形状: (C,1,3,3)，对最后两维求均值并回减
-        mean_per_kernel = grad.mean(dim=(2, 3), keepdim=True)
-        grad = grad - mean_per_kernel
-
-        # 3) 温和范数裁剪（按整体 L2 范数做一次缩放，不会“硬砍”）
-        total_norm = torch.linalg.vector_norm(grad)
-        if torch.isfinite(total_norm) and total_norm > 1.0:
-            grad = grad * (1.0 / total_norm)
-
-        return grad
-
-    def forward(self, x):
-        # 多尺度
-        x0 = F.interpolate(x, scale_factor=0.125, mode='bicubic')
-        x1 = F.interpolate(x, scale_factor=0.25, mode='bicubic')
-        x2 = F.interpolate(x, scale_factor=0.5, mode='bicubic')
-
-        # 深度可分组卷积提取高频
-        lap_0 = F.conv2d(x0, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
-        lap_1 = F.conv2d(x1, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
-        lap_2 = F.conv2d(x2, self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
-        lap_3 = F.conv2d(x,  self.kernel, groups=self.channel_dim, padding=1, stride=1, dilation=1)
-
-        # 还原到同一尺度
-        lap_0 = F.interpolate(lap_0, scale_factor=8, mode='bicubic')
-        lap_1 = F.interpolate(lap_1, scale_factor=4, mode='bicubic')
-        lap_2 = F.interpolate(lap_2, scale_factor=2, mode='bicubic')
-
-        lap_out = torch.cat([lap_0, lap_1, lap_2, lap_3], dim=1)
-        return lap_out, x0, x1, x2
-
-
-class ChannelAttention(nn.Module):
-    # The channel attention block
-    # Original relize of CBAM module.
-    # Sigma(MLP(F_max^c) + MLP(F_avg^c)) -> output channel attention feature.
-    def __init__(self, channel, reduction=16):
-        super(ChannelAttention, self).__init__()
-
-        # self.norm = nn.BatchNorm2d(channel)
-
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        # 更稳定的初始化 + LayerNorm 替代 BatchNorm
-        self.fc = nn.Sequential(
-            nn.Conv2d(channel, channel // reduction, 1, bias=True),
-            nn.LayerNorm([channel * reduction, 1, 1]),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channel * reduction, channel, 1, bias=True),
-        )
-
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-
-        # x = torch.clamp(x, -10.0, 10.0)  # 限制极值
-        avg_output = self.fc(torch.tanh(self.avg_pool(x)) * 3)
-        max_output = self.fc(torch.tanh(self.max_pool(x)) * 3)
-
-        out = avg_output + max_output
-        return self.sigmoid(out)
-
-# 对特征图的每个空间位置（像素）分配一个权重（0~1），突出重要区域并抑制无关背景。
-class SpatialAttention(nn.Module):
-    # The spatial attention block.
-    # Simgoid(conv([F_max^s; F_avg^s])) -> output spatial attention feature.
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        assert kernel_size in [3, 7], 'kernel size must be 3 or 7.'
-        padding_size = 1 if kernel_size == 3 else 3
-
-        self.conv = Conv2DLayer(in_channels=2, out_channels=1, padding=padding_size, bias=False, kernel_size=kernel_size)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True) # [B,1,H,W]
-        max_out, _ = torch.max(x, dim=1, keepdim=True) # [B,1,H,W]
-
-        pool_out = torch.cat([avg_out, max_out], dim=1) # [B,2,H,W]
-        x = self.conv(pool_out) # 融合
-        return self.sigmoid(x) # 输出
-
-# 通道注意力+空间注意力
-class CBAMlayer(nn.Module):
-    # THe CBAM module(Channel & Spatial Attention feature) implement
-    # reference from paper: CBAM(Convolutional Block Attention Module)
-    def __init__(self, channel, reduction=1):
-        super(CBAMlayer, self).__init__()
-        self.channel_layer = ChannelAttention(channel, reduction)
-        self.spatial_layer = SpatialAttention()
-
-    def forward(self, x):
-        x = self.channel_layer(x) * x
-        x = self.spatial_layer(x) * x
-        return x
-
-# 带有通道注意力和空间注意力的残差快
-class ResidualCbamBlock(nn.Module):
-    # The ResBlock which contain CBAM attention module.
-
-    def __init__(self, channel, reduction, norm=nn.BatchNorm2d, dilation=1, bias=False, act=nn.ReLU(True)):
-        super(ResidualCbamBlock, self).__init__()
-
-        self.conv1 = Conv2DLayer(channel, channel, kernel_size=3, stride=1, padding=1, dilation=dilation, norm=norm, act=act, bias=bias)
-        self.conv2 = Conv2DLayer(channel, channel, kernel_size=3, stride=1, padding=1, dilation=dilation, norm=norm, act=None, bias=None)
-        self.cbam_layer = CBAMlayer(channel,reduction=1)
-
-    def forward(self, x):
-        res = x
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.cbam_layer(x)
-
-        out = x + res
-        return out
-
-class SElayer(nn.Module):
-
-    def __init__(self, channel, reduction=16):
-        super(SElayer, self).__init__()
-
-        self.avg_pool = nn.AdaptiveAvgPool2d(1) 
-        self.se = nn.Sequential(
-            nn.Linear(channel, channel // reduction),
-            nn.ReLU(inplace=True),
-            nn.Linear(channel // reduction, channel),
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.shape
-        y = self.avg_pool(x).view(b, c)
-        y = ((torch.tanh(self.se(y))+1)/2).view(b, c, 1, 1)
-        return x * y
-
-class SEResidualBlock(nn.Module):
-    # The ResBlock implements: the conv & skip connections here.
-    # Original Resnet paper: https://arxiv.org/pdf/1512.03385.pdf. 
-    # Which contains SE-layer implements.
-    def __init__(self, channel, norm=nn.BatchNorm2d, dilation=1, bias=False, se_reduction=None, res_scale=0.1, act=nn.GELU()):# 调用时既没有归一化 也没有激活
-        super(SEResidualBlock, self).__init__()
-
-        self.conv1 = Conv2DLayer(channel, channel, kernel_size=3, stride=1, padding=1, dilation=dilation, norm=norm, act=act, bias=bias)
-        self.conv2 = Conv2DLayer(channel, channel, kernel_size=3, stride=1, padding=1, dilation=dilation, norm=norm, act=None, bias=None)
-        self.se_layer = None
-        self.res_scale = res_scale # res_scale 是一个缩放因子，用于对残差块的输出进行缩放。其主要目的是在训练过程中稳定网络的梯度，从而加速收敛并提高训练的稳定性。
-        if se_reduction is not None: # se_reduction 通常与 Squeeze-and-Excitation (SE) 模块有关。SE 模块是一种在卷积神经网络（CNN）中的注意力机制，它通过自适应地重新校准通道特征来提升模型的表现。se_reduction 是 SE 模块中的一个参数，用于控制特征图在 Squeeze 阶段的通道缩减比例。
-            self.se_layer = SElayer(channel, se_reduction)
-
-    def forward(self, x):
-        res = x # 残差
-        x = self.conv1(x)
-        x = self.conv2(x)
-        if self.se_layer:
-            x = self.se_layer(x) # 通道注意力
-        x = x * self.res_scale 
-        out = x + res # 残差链接
-        return out
-
-# --------------------------
-# 编码块 CSA 
-# --------------------------
-class EncoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction):
-        super().__init__()
-
-        self.conv = Conv2DLayer(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
-        self.csa0 = ResidualCbamBlock(channel=out_channels, reduction=reduction)
-        self.csa1 = ResidualCbamBlock(channel=out_channels, reduction=reduction)
-        self.out = nn.Sequential(
-            Conv2DLayer(out_channels, out_channels, 1),
-            nn.BatchNorm2d(out_channels),  # 添加 BatchNorm2d
-            nn.GELU()                    
-        )
-
-    def forward(self, x):
-
-        x = self.conv(x)
-        x = self.csa0(x)
-        x = self.csa1(x)
-        return self.out(x)
-
-# --------------------------
-# 解码块
-# --------------------------
-class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
-        self.conv = nn.Sequential(
-            Conv2DLayer(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),  # 添加 BatchNorm2d
-            nn.GELU()                    
-        )
-
-    def forward(self, x, skip=None):
-        x = self.up(x)
-        return self.conv(x)
-
-# --------------------------
-# RDM 模块：完整结构版
-# --------------------------
-class RDM(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.Lap = LaplacianPyramid(dim=3)
-
-        self.se0 = SEResidualBlock(channel=6, se_reduction=2, res_scale=0.1)
-        self.se1 = SEResidualBlock(channel=6, se_reduction=2, res_scale=0.1)
-        self.se2 = SEResidualBlock(channel=6, se_reduction=2, res_scale=0.1)
-        self.se3 = SEResidualBlock(channel=6, se_reduction=2, res_scale=0.1)
-
-        self.se4 = SEResidualBlock(channel=18, se_reduction=6, res_scale=0.1)
-        self.se5 = SEResidualBlock(channel=18, se_reduction=6, res_scale=0.1)
-        self.se6 = SEResidualBlock(channel=18, se_reduction=6, res_scale=0.1)
-        self.se7 = SEResidualBlock(channel=18, se_reduction=6, res_scale=0.1)
-
-        # Output
-        self.out_head = Conv2DLayer(in_channels=18,out_channels=3,kernel_size=1,padding=0,stride=1,bias=False)          
-        
-        self.tanh = nn.Tanh()
-        
-        
-
-    def forward(self, x):
-
-        lap,xd8,xd4,xd2 = self.Lap(x) # B 12 H W 和 B,3,H,W
-
-        x_se = torch.cat([x, x],dim=1) # B 6 256 256 扩展是因为se要压
-        x_se = self.se0(x_se)
-        x_se = self.se1(x_se)
-        x_se = self.se2(x_se)
-        x_se = self.se3(x_se)
-
-        x_se = torch.cat([x_se, lap], dim=1) # B 6+12 256 256
-        x_se = self.se4(x_se)
-        x_se = self.se5(x_se)
-        x_se = self.se6(x_se)
-        x_se = self.se7(x_se)
-
-        out = self.out_head(x_se) # (B,3,256,256)
-        out = (self.tanh(out)+1)/2
-        return out,xd8,xd4,xd2
-
-
+from MTRR_RD_modules import LRM
 
 class MTRRNet(nn.Module):
-    """Token-only多尺度架构：
-    多尺度编码 → Token融合 → 统一解码
-    频带分工：低频→Mamba，高频→Swin
-    """
+
     def __init__(self):
         super().__init__()
         
@@ -375,18 +19,20 @@ class MTRRNet(nn.Module):
     def _init_token_only(self):
         """初始化Token-only版本的组件"""
         # 延迟导入token模块以避免循环导入和依赖问题
-        from token_modules import (
+        from MTRR_token_modules import (
             Encoder, SubNet, UnifiedTokenDecoder, init_all_weights
         )
         init_all_weights(self)
         
-        # RDM保持不变，用于生成rmap
-        # self.rdm = RDM()
+        # 反射先验
+        self.ref_detect = LRM('cuda')  # 输出64通道的256*256
         
         self.use_rev = True
 
         # 编码器
         self.token_encoder = Encoder(
+            in_chans=64,
+            embed_dim=96,
             mamba_blocks=[10, 10, 10, 10],    # Mamba处理低频
             swin_blocks=[4, 4, 4, 4],          # Swin处理高频
             drop_branch_prob=0.2
@@ -433,16 +79,12 @@ class MTRRNet(nn.Module):
         )
 
 
-
-
-    
-    
     def forward(self, x_in):
-        """Token-only版本的前向传播"""
         
+        x,c_map = self.ref_detect(x_in) # 输出64通道的256*256
         
-        # 2. 多尺度Token编码
-        tokens_list = self.token_encoder(x_in)
+        # 2 Token编码
+        tokens_list = self.token_encoder(x)
         # tokens_list: [t0, t1, t2, t3] 每个(B, N_i, C_i)
         
         resident_tokens_list = tokens_list 
@@ -465,8 +107,9 @@ class MTRRNet(nn.Module):
         out3 = self.token_decoder3(tokens_list, resident_tokens_list, x_in)  # (B, 6, 256, 256)
 
         outs = [out0,out1,out2,out3]
+        # outs = [torch.zeros_like(out3),torch.zeros_like(out3),torch.zeros_like(out3),out3]  # 测试吞吐量时不需要中间监督
         
-        return outs
+        return outs,c_map
 
 
     
@@ -560,8 +203,8 @@ class MTRREngine(nn.Module):
 
         self.Ic = self.I  # 直接设置为原始输入
         
-        # 使用原始输入调用token-only模型
-        self.outs = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
+        
+        self.outs,self.c_map = self.netG_T(self.Ic)  # 改为使用self.I而非self.Ic
         
         for i in range(0,len(self.outs)):
             self.fake_Ts[i] = self.outs[i][:,0:3,:,:] 

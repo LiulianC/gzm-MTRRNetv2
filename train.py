@@ -19,7 +19,7 @@ from early_stop import EarlyStopping
 from customloss import CustomLoss
 from torch import amp
 scaler = amp.GradScaler()
-from option import build_train_opts, get_lr_map, build_optimizer_and_scheduler, build_early_stopping
+from MTRR_option import build_train_opts, get_lr_map, build_optimizer_and_scheduler, build_early_stopping
 from set_seed import set_seed 
 from torchvision.utils import make_grid
 from util.csv import write_csv_row, _to_float
@@ -150,7 +150,7 @@ if __name__ == '__main__':
     os.mkdir(output_dir7)
 
 
-    # 优化器、调度器、LR映射统一由 option.py 构建
+    # 优化器、调度器、LR映射统一由 MTRR_option.py 构建
     optimizer, scheduler, lr_map, _group_stats = build_optimizer_and_scheduler(model.netG_T, opts, profile='train')
 
 
@@ -298,37 +298,27 @@ if __name__ == '__main__':
             
             total_train_step += 1
 
+
+            # 保存
+            grid_input = make_grid(train_input, nrow=train_input.size(0), padding=0, normalize=True)
+            grid_fakeT = make_grid(train_fake_Ts[-1], nrow=train_fake_Ts[-1].size(0), padding=0, normalize=True)
+            grid_label = make_grid(train_label1, nrow=train_label1.size(0), padding=0, normalize=True)
+            grid_cmap = make_grid(train_rcmaps, nrow=train_rcmaps.size(0), padding=0, normalize=True)
+            grid_fakeR = make_grid(train_fake_Rs[-1], nrow=train_fake_Rs[-1].size(0), padding=0, normalize=True)
+            grid_label2 = make_grid(train_label2, nrow=train_label2.size(0), padding=0, normalize=True)
+    
+            grid_all = torch.cat([grid_input, grid_fakeT, grid_label, grid_cmap, grid_fakeR, grid_label2], dim=1)
+
             if i % 3 == 0 and i<11 and total_train_step%10==0:
-
-                save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=train_input.size(0))
-                save_image(visuals['fake_Rs'][-1], os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=train_input.size(0))
-
-                grid_input = make_grid(train_input, nrow=train_input.size(0), padding=0, normalize=True)
-                grid_fakeT = make_grid(train_fake_Ts[-1], nrow=train_fake_Ts[-1].size(0), padding=0, normalize=True)
-                grid_label = make_grid(train_label1, nrow=train_label1.size(0), padding=0, normalize=True)
-
-                # 按行拼接：三行纵向堆叠 (C, H_total, W)
-                grid_all = torch.cat([grid_input, grid_fakeT, grid_label], dim=1)
-
-                # 保存到文件
                 save_path = os.path.join(output_dir7, f'epoch{i}+{total_train_step}-loss{all_loss:.4g}train_grid.png')
                 save_image(grid_all, save_path)
-
             elif i%10 == 0 and total_train_step%10==0:
-
-                save_image(train_label2, os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_reflection.png'), nrow=train_input.size(0))
-                save_image(visuals['fake_Rs'][-1], os.path.join(output_dir7, f'epoch{i}+{total_train_step}-train_FakeR.png'), nrow=train_input.size(0))
-
-                grid_input = make_grid(train_input, nrow=train_input.size(0), padding=2, normalize=True)
-                grid_fakeT = make_grid(train_fake_Ts[-1], nrow=train_fake_Ts[-1].size(0), padding=2, normalize=True)
-                grid_label = make_grid(train_label1, nrow=train_label1.size(0), padding=2, normalize=True)
-
-                # 按行拼接：三行纵向堆叠 (C, H_total, W)
-                grid_all = torch.cat([grid_input, grid_fakeT, grid_label], dim=1)
-
-                # 保存到文件
                 save_path = os.path.join(output_dir7, f'epoch{i}+{total_train_step}-loss{all_loss:.4g}train_grid.png')
                 save_image(grid_all, save_path)
+
+
+
+
 
             if i % 1 == 0:
                 current_lr = optimizer.param_groups[0]['lr']
@@ -441,31 +431,22 @@ if __name__ == '__main__':
                             torch.cuda.synchronize()
                         time.sleep(opts.throttle_ms / 1000.0)
 
-                    if (i+1) % 2 == 0 and total_test_step % 1 == 0 and i<=10:                        
-                        B = test_imgs.size(0)
-                        # 每行各自拼 batch
-                        grid_in  = make_grid(test_imgs, nrow=B, padding=0)
-                        grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=0)
-                        grid_tgt = make_grid(test_label1, nrow=B, padding=0)
 
-                        # 高度方向拼接成三行
-                        grid_all = torch.cat([grid_in, grid_out, grid_tgt], dim=1)  # dim=1 是 H 维度
 
-                        # 调用你已有的 save_image 保存
+
+
+                    B = test_imgs.size(0)
+                    grid_in  = make_grid(test_imgs, nrow=B, padding=0)
+                    grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=0)
+                    grid_tgt = make_grid(test_label1, nrow=B, padding=0)
+                    grid_cmap = make_grid(test_rcmaps, nrow=B, padding=0)
+
+                    grid_all = torch.cat([grid_in, grid_out, grid_tgt, grid_cmap], dim=1)  # dim=1 是 H 维度
+
+                    if (i) % 1 == 0 and total_test_step % 1 == 0 and i<=10:                        
                         save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
 
-                    # elif (i+1) % 5 == 0 :
-                    elif i % 1 == 0 :
-                        B = test_imgs.size(0)
-                        # 每行各自拼 batch
-                        grid_in  = make_grid(test_imgs, nrow=B, padding=0)
-                        grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=0)
-                        grid_tgt = make_grid(test_label1, nrow=B, padding=0)
-
-                        # 高度方向拼接成三行
-                        grid_all = torch.cat([grid_in, grid_out, grid_tgt], dim=1)  # dim=1 是 H 维度
-
-                        # 调用你已有的 save_image 保存
+                    elif i>=15 and (i) % 5 == 0 :
                         save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
 
 

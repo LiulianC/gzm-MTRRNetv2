@@ -55,11 +55,11 @@ class CustomLoss(torch.nn.Module):
         
         self.fake_R_weight = 0.3
         self.fake_T_weight = 1.0
-        self.Rcmaps_weight = 0
+        self.Rcmaps_weight = 0.1
         self.all_img_weight = 0
 
         # 对于残留反光区域的权重
-        self.spr_loss_weight = 40
+        self.spr_loss_weight = 10
 
         # fake_Ts范围软约束正则项权重
         self.fake_Ts_range_weight = 0.01

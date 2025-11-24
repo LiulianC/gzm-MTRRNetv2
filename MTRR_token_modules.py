@@ -491,7 +491,7 @@ class Mamba2Blocks_Standard(nn.Module):
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
         self.channel_first = channel_first
-        self.n_layer = n_layer
+        self.n_layer = n_layer 
 
         self.Mamba_num = n_layer
         if attn_cfg is not None:
@@ -687,17 +687,25 @@ class SwinTokenBlock(nn.Module):
 
 
 
-
+from MTRR_RD_modules import FrequencyProcessor,ChannelAttention
 
 class EncoderUnit(nn.Module):
     """单个尺度的Token处理阶段：频带分离→分别编码→融合（支持随机失活分支）"""
-    def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, need_downsample=False):
+    def __init__(self, ori_img_size=256, embed_dim=96, mamba_blocks=2, swin_blocks=2, grid_size=64, window_size=8, drop_branch_prob=0.1, 
+                 need_downsample=False, need_freqAttention=False, need_channelAttention=False):
         super().__init__()
         self.img_size = ori_img_size
         self.grid_size = grid_size
         self.drop_branch_prob = drop_branch_prob
         # self.training = training # self.training是nn.Module自带的属性 不应该自己赋值 它会在train()/eval()时自动切换
         self.need_downsample = need_downsample
+        self.need_freqAttention = need_freqAttention
+        self.need_channelAttention = need_channelAttention
+
+        if self.need_freqAttention:
+            self.freqatt = FrequencyProcessor(channels=embed_dim, int_size=2*embed_dim)
+        if self.need_channelAttention:
+            self.channelatt = ChannelAttention(dim=embed_dim, num_heads=2, bias=True)
 
 
         # 旁路梯度强度（极小）：不改变前向数值，但能给被丢分支“续一点梯度”
@@ -732,12 +740,28 @@ class EncoderUnit(nn.Module):
 
     def forward(self, x):
         # x: (B, N, C)
+
         if self.need_downsample is True:
             B, N, C = x.shape
             x = x.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))
             x = self.downSample(x)  # (B, 2C, H/2, W/2)
             B, C, H, W = x.shape
             x = x.permute(0,2,3,1).contiguous().view(B, H*W, C)
+
+        if self.need_freqAttention: # 用在编码的头和解码的尾
+            B, N, C = x.shape
+            x = x.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))            
+            x = self.freqatt(x)
+            B, C, H, W = x.shape
+            x = x.permute(0,2,3,1).contiguous().view(B, H*W, C)            
+
+        if self.need_channelAttention: # 用在编码的头和解码的尾
+            B, N, C = x.shape
+            x = x.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))            
+            x = self.channelatt(x)
+            B, C, H, W = x.shape
+            x = x.permute(0,2,3,1).contiguous().view(B, H*W, C)            
+
         low_tokens = x.contiguous()  # (B, N, C)
         high_tokens = x.contiguous() # (B, N, C)
         B,N,C = x.shape
@@ -797,25 +821,25 @@ class EncoderUnit(nn.Module):
 
 class Encoder(nn.Module):
     """多尺度Token编码器：处理4个尺度得到token表示"""
-    def __init__(self, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2):
+    def __init__(self, in_chans=3, embed_dim=96, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2):
         super().__init__()
         
-        self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=3, embed_dim=96)
+        self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=in_chans, embed_dim=embed_dim)
 
         self.encoder_unit0 = EncoderUnit(embed_dim=96, grid_size=64, ori_img_size=256, mamba_blocks=mamba_blocks[0], swin_blocks=swin_blocks[0], 
-                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=False)
+                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=False, need_freqAttention=True)
         
         self.encoder_unit1 = EncoderUnit(embed_dim=192, grid_size=32, ori_img_size=256, mamba_blocks=mamba_blocks[1], swin_blocks=swin_blocks[1], 
-                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=True)
+                                    window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
 
         # self.downSample0 = nn.Conv2d(96, 192, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
         # self.downSample1 = nn.Conv2d(192, 384, kernel_size=2, stride=2, padding=0, bias=False)# 不重叠下采样
 
         self.encoder_unit2 = EncoderUnit(embed_dim=384, grid_size=16, ori_img_size=256, mamba_blocks=mamba_blocks[2], swin_blocks=swin_blocks[2], 
-                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True)
+                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
         
         self.encoder_unit3 = EncoderUnit(embed_dim=768, grid_size=8, ori_img_size=256, mamba_blocks=mamba_blocks[3], swin_blocks=swin_blocks[3], 
-                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True)
+                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
     
     def forward(self, x_in):
         # x_in: (B, 3, 256, 256)
@@ -1268,8 +1292,7 @@ class UnifiedTokenDecoder(nn.Module):
         )
         self.convblock01 = nn.Sequential(
             ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[1]//2, 2*embed_dims[1]//2, embed_dims[1]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ChannelAttention(dim=embed_dims[1]//2,num_heads=2,bias=True),
             )        
 
 
@@ -1286,8 +1309,7 @@ class UnifiedTokenDecoder(nn.Module):
         )
         self.convblock12 = nn.Sequential(
             ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[2]//2, 2*embed_dims[2]//2, embed_dims[2]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ChannelAttention(dim=embed_dims[2]//2,num_heads=2,bias=True),
             )
         
 
@@ -1304,8 +1326,7 @@ class UnifiedTokenDecoder(nn.Module):
         )
         self.convblock23 = nn.Sequential(
             ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+            ChannelAttention(dim=embed_dims[3]//2,num_heads=2,bias=True),
             )
         
 
@@ -1326,6 +1347,8 @@ class UnifiedTokenDecoder(nn.Module):
             nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1, bias=False),
             nn.InstanceNorm2d(64, affine=True),
             nn.GELU(),
+
+            FrequencyProcessor(channels=64,int_size=128),
 
             # 特征细化
             nn.Conv2d(64, 32, kernel_size=3, padding=1, padding_mode='reflect', bias=False),

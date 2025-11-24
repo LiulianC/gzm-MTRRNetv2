@@ -30,19 +30,19 @@ def build_train_opts(argv=None):
 
     # Post-populate attributes to match train.py behavior
     opts.batch_size_train = 8
-    opts.batch_size_test = 4
+    opts.batch_size_test = 8
 
     opts.shuffle = True
     opts.display_id = -1 
     opts.num_workers = 0
 
     opts.always_print = 0
-    opts.debug_monitor_layer_stats = 1
-    opts.debug_monitor_layer_grad = 1
+    opts.debug_monitor_layer_stats = 0
+    opts.debug_monitor_layer_grad = 0
 
-    opts.training = False
+    opts.training = True
     
-    opts.epoch = 300
+    opts.epoch = 30
     opts.es_patience = 20
     if opts.training:
         opts.sampler_size1 = 0
@@ -50,20 +50,20 @@ def build_train_opts(argv=None):
         opts.sampler_size3 = 800
         opts.sampler_size4 = 0
         opts.sampler_size5 = 1200
-        opts.test_size = [200, 0, 0, 0, 200, 200, 0]
+        opts.test_size = [200, 0, 0, 0, 200, 200]
     else:
         opts.sampler_size1 = 0
         opts.sampler_size2 = 0
         opts.sampler_size3 = 8
         opts.sampler_size4 = 0
         opts.sampler_size5 = 12
-        opts.test_size = [200, 0, 0, 0, 0, 0, 0]
+        opts.test_size = [200, 0, 0, 0, 200, 200]
 
     # Model loading/reset flags
     # opts.model_path = './model_62_best1.pth'
-    opts.model_path = None
-    opts.model_path = './model_fit/model_latest.pth'
     # opts.model_path = './model_fit/model_240.pth'
+    opts.model_path = './model_fit/model_latest.pth'
+    # opts.model_path = None
     opts.reset_best = False
     opts.base_lr = 1e-4
 
