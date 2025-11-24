@@ -11,7 +11,7 @@ from tqdm import tqdm
 from torch.utils.data import ConcatDataset
 from dataset.new_dataset1 import HyperKDataset_Test,DSRTestDataset
 from MTRRNet import MTRREngine
-from option import build_train_opts
+from MTRR_option import build_train_opts
 from torchvision.utils import make_grid
 from util.color_enhance import histogram_equalization_lab,hist_match_batch_tensor
 

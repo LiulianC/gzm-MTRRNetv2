@@ -1,7 +1,7 @@
 """
 reverse_function.py
 
-基于 token_modules.SubNet 的近似可逆函数：
+基于 MTRR_token_modules.SubNet 的近似可逆函数：
 - 给定 SubNet 的输出 tokens_spatial_list = [x_emb, f0_out, f1_out, f2_out, f3_out]
 - 在不修改 SubNet 参数的前提下，利用 SubNet 内部算子（上/下采样与 Mamba2 blocks）
   估计恢复进入 SubNet 之前的 tokens：[x_emb, f0, f1, f2, f3]
@@ -26,7 +26,7 @@ reverse_function.py
   为避免 Dropout 干扰，内部会临时将 mamba blocks 切换到 eval() 模式，并默认 no_grad。
 
 用法示例
-    from token_modules import SubNet
+    from MTRR_token_modules import SubNet
     from reverse_function import reverse_subnet
 
     subnet: SubNet = ...
@@ -42,7 +42,7 @@ import torch
 
 try:
     # 类型注解友好：运行时不依赖
-    from token_modules import SubNet  # type: ignore
+    from MTRR_token_modules import SubNet  # type: ignore
 except Exception:  # pragma: no cover
     SubNet = object  # 仅为静态工具友好
 

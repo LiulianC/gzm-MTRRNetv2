@@ -6,11 +6,11 @@ from dataset.new_dataset1 import DSRTestDataset, HyperKDataset
 from torch.utils.data import ConcatDataset
 import math
 import warnings
-from option import get_lr_map, build_optimizer_and_scheduler, build_train_opts
+from MTRR_option import get_lr_map, build_optimizer_and_scheduler, build_train_opts
 
 warnings.filterwarnings('ignore')
 
-# 配置参数改为由 option.py 提供，便于集中管理
+# 配置参数改为由 MTRR_option.py 提供，便于集中管理
 opts = build_train_opts()
 
 

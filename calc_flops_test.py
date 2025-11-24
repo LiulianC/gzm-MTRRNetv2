@@ -193,7 +193,7 @@ def count_transformer_block(m, x, y):
     print(f"[DEBUG] Swin FLOPs accumulated: {swin_flops}\n")
 
 # --- 扩展自定义操作注册 ---
-from token_modules import VSSTokenMambaModule, SwinTokenBlock, Mamba2Blocks_Standard, SwinTransformerBlock
+from MTRR_token_modules import VSSTokenMambaModule, SwinTokenBlock, Mamba2Blocks_Standard, SwinTransformerBlock
 
 # 尝试导入其他可能的Mamba相关模块
 try:
