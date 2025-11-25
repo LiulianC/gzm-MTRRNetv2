@@ -1314,9 +1314,11 @@ class UnifiedTokenDecoder(nn.Module):
 
         # Base缩放因子
         # self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
-        self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
-        self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))        
+        # self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
+        # self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))        
         
+        self.conv_out = nn.Conv2d(in_channels=12, out_channels=6, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
+
     def forward(self, tokens_list, resident_tokens_list, x_in):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
         # x_in: (B, 3, 256, 256) 原始输入
@@ -1360,10 +1362,12 @@ class UnifiedTokenDecoder(nn.Module):
         
         # Base residual: 输入图像的 residual base（T、R 分别保留一份轻微的输入基线）
         # 这里按通道维拼接，无需在 batch 维做任何复制；形状保持为 (B,6,H,W)
-        output = delta + torch.cat([
-            self.base_scale_T * x_in,  # 对应 T 分支的基线
-            self.base_scale_R * x_in   # 对应 R 分支的基线
-        ], dim=1)  # (B, 6, 256, 256)
+        # output = delta + torch.cat([
+        #     self.base_scale_T * x_in,  # 对应 T 分支的基线
+        #     self.base_scale_R * x_in   # 对应 R 分支的基线
+        # ], dim=1)  # (B, 6, 256, 256)
+
+        output = self.conv_out(torch.cat([delta,x_in,x_in],dim=1))
 
         
         return output  # (B, 6, 256, 256)
