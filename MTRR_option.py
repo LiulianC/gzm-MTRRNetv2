@@ -40,9 +40,9 @@ def build_train_opts(argv=None):
     opts.debug_monitor_layer_stats = 0
     opts.debug_monitor_layer_grad = 0
 
-    opts.training = True
+    opts.training = False
     
-    opts.epoch = 30
+    opts.epoch = 31
     opts.es_patience = 20
     if opts.training:
         opts.sampler_size1 = 0

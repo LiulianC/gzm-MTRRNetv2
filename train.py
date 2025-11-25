@@ -44,7 +44,7 @@ opts.epoch = opts.epoch
 opts.sampler_size1 = opts.sampler_size1
 opts.sampler_size2 = opts.sampler_size2
 opts.sampler_size3 = opts.sampler_size3
-opts.sampler_size4 = opts.sampler_size4
+opts.sampler_size4 = opts.sampler_size4 
 opts.sampler_size5 = opts.sampler_size5
 opts.test_size = opts.test_size
 opts.model_path = opts.model_path
@@ -526,26 +526,31 @@ if __name__ == '__main__':
             print(f"Early stopping triggered at epoch {i}!") 
             break
 
-        if avg_test_loss<min_loss:
-            min_loss = avg_test_loss 
-            print(f"New best model at epoch {i} with loss {min_loss:.4f}")
-            torch.save(state, "./model_fit/model_{}.pth".format(i + 1))        
-        else:
-            print(f"Epoch {i} did not improve. Best loss:{min_loss:.4f}  now: {avg_test_loss:.4f}")   
-
         t2 = time.time()
         run_times.append(t2 - t1)
         if (i) % 1 == 0:
-            print('processing the {} epoch, {} mins passed by'.format(i + 1, run_times[-1]/60))
-            torch.save(state, "./model_fit/model_latest.pth".format(i + 1))
-            print("模型已保存")         
+            print(f'processing the {i + 1} epoch, {(run_times[-1]/60):.4f} mins passed by')
+
+        if opts.training:
+            if avg_test_loss<min_loss:
+                min_loss = avg_test_loss 
+                print(f"New best model at epoch {i} with loss {min_loss:.4f}")
+                torch.save(state, "./model_fit/model_{}.pth".format(i + 1))        
+            else:
+                print(f"Epoch {i} did not improve. Best loss:{min_loss:.4f}  now: {avg_test_loss:.4f}")   
+
+            if (i) % 1 == 0:
+                torch.save(state, "./model_fit/model_latest.pth".format(i + 1))
+                print("模型已保存")         
 
         # 清理缓存
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
-    torch.save(state, "./model_fit/model_latest.pth".format(opts.epoch))
-    print("模型已保存")
+    print("==============训练已经结束==============")
+    if opts.training:
+        torch.save(state, "./model_fit/model_latest.pth".format(opts.epoch))
+        print("模型已保存")
 
 # tensorboard_writer.close()
 
