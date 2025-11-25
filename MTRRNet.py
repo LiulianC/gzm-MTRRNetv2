@@ -109,7 +109,7 @@ class MTRRNet(nn.Module):
         outs = [out0,out1,out2,out3]
         # outs = [torch.zeros_like(out3),torch.zeros_like(out3),torch.zeros_like(out3),out3]  # 测试吞吐量时不需要中间监督
         
-        return outs,c_map
+        return outs, c_map
 
 
     
@@ -213,7 +213,7 @@ class MTRREngine(nn.Module):
             self.fake_Rs[i] = self.outs[i][:,3:6,:,:] 
         
 
-        self.c_map = torch.zeros_like(self.I) # 不要rdm了
+        # self.c_map = torch.zeros_like(self.I) # 不要rdm了
 
 
         

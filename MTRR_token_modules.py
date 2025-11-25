@@ -223,6 +223,162 @@ class TokenPatchEmbed(nn.Module):
         return pos_2d
 
 
+from typing import Optional
+
+class OverlapTokenPatchEmbed(nn.Module):
+    """将图像 patches 转换为 tokens（重叠 patch；2D sin/cos 位置编码，非学习型）"""
+
+    def __init__(
+        self,
+        img_size: int = 256,
+        patch_size: int = 6,
+        in_chans: int = 3,
+        embed_dim: int = 96,
+        use_sincos_pos: bool = True,
+        pos_init_scale: float = 0.1,
+        stride: Optional[int] = None,
+        padding: int = 0,
+        default_grid_size: int = 64,  # 仅作为配置记录/检查用，逻辑上不强依赖
+    ):
+        """
+        img_size: 输入图像边长（假定方图），例如 256
+        patch_size: 卷积 kernel_size（也是 patch 的大小）
+        stride: 卷积 stride；默认为 patch_size（即不重叠），也可以 < patch_size 实现重叠
+        padding: 卷积 padding
+        default_grid_size: 期望的输出网格边长（例如 64 / 32 / 16），用于配置说明或断言
+        """
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.stride = stride if stride is not None else patch_size
+        self.padding = padding
+        self.embed_dim = embed_dim
+        self.use_sincos_pos = use_sincos_pos
+        self.default_grid_size = default_grid_size
+
+        self.num_patches: Optional[int] = None
+
+        # patch 投影卷积：kernel=patch_size, stride/padding 可自定义（支持重叠）
+        self.proj = nn.Conv2d(
+            in_chans,
+            embed_dim,
+            kernel_size=patch_size,
+            stride=self.stride,
+            padding=self.padding,
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+
+        if self.use_sincos_pos:
+            self.pos_alpha = nn.Parameter(torch.tensor(float(pos_init_scale)))
+            self.pos_alpha.register_hook(self._pos_alpha_grad_hook)
+        else:
+            self.pos_alpha = None
+
+    def _pos_alpha_grad_hook(self, grad: torch.Tensor) -> torch.Tensor:
+        if grad is None:
+            return grad
+        gmax = 0.1
+        return grad.clamp(min=-gmax, max=gmax)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, C, H, W)
+        return: (B, N, embed_dim)
+        """
+        x = self.proj(x)               # (B, embed_dim, Ht, Wt)
+        B, C, Ht, Wt = x.shape
+        self.num_patches = Ht * Wt
+
+        # 如果你想强校验一下 gridsize，也可以在这里加断言（可选）
+        # assert Ht == self.default_grid_size and Wt == self.default_grid_size, \
+        #     f"Got grid {Ht}x{Wt}, expected {self.default_grid_size}x{self.default_grid_size}"
+
+        x = x.flatten(2).transpose(1, 2)    # (B, N, C)
+        x = self.norm(x)
+
+        # 动态 2D sin/cos 位置编码
+        if self.use_sincos_pos and self.pos_alpha is not None:
+            pos = self._build_2d_sincos_pos_embed(
+                Ht, Wt, self.embed_dim, device=x.device
+            ).to(dtype=x.dtype)  # (1, Ht*Wt, C)
+            x = x + self.pos_alpha * pos
+
+        return x  # (B, N, embed_dim)
+
+    @staticmethod
+    def _get_1d_sincos_pos_embed(embed_dim, length, device):
+        if embed_dim % 2 != 0:
+            extra = 1
+            d = embed_dim - 1
+        else:
+            extra = 0
+            d = embed_dim
+
+        position = torch.arange(length, dtype=torch.float32, device=device).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d, 2, dtype=torch.float32, device=device)
+            * (-math.log(10000.0) / d)
+        )
+
+        sinusoid = position * div_term
+        emb = torch.cat([sinusoid.sin(), sinusoid.cos()], dim=1)
+
+        if extra == 1:
+            pad = torch.zeros(length, 1, device=device, dtype=torch.float32)
+            emb = torch.cat([emb, pad], dim=1)
+
+        return emb
+
+    @classmethod
+    def _build_2d_sincos_pos_embed(cls, H, W, embed_dim, device="cpu"):
+        dim_h = embed_dim // 2
+        dim_w = embed_dim - dim_h
+
+        pos_h = cls._get_1d_sincos_pos_embed(dim_h, H, device)  # (H, dim_h)
+        pos_w = cls._get_1d_sincos_pos_embed(dim_w, W, device)  # (W, dim_w)
+
+        pos_h_broadcast = pos_h[:, None, :].repeat(1, W, 1)     # (H, W, dim_h)
+        pos_w_broadcast = pos_w[None, :, :].repeat(H, 1, 1)     # (H, W, dim_w)
+        pos_2d = torch.cat([pos_h_broadcast, pos_w_broadcast], dim=2)  # (H, W, C)
+
+        pos_2d = pos_2d.view(1, H * W, embed_dim)
+        return pos_2d
+
+## 实例化如下 注意 为了与主流的gridsize保持统一 重叠patchembed的 patchsize(kernelsize) stride padding 都是计算过的特定值 不要更改
+## 计算的原理是 令sride = patchsize-2 令p=1 从2d卷积形状公式中推导出来
+
+# # 256x256 -> 64x64（kernel=6, stride=4, padding=1）
+# embed_64 = OverlapTokenPatchEmbed(
+#     img_size=256,
+#     patch_size=6,
+#     in_chans=3,
+#     embed_dim=768,
+#     stride=4,
+#     padding=1,
+#     default_grid_size=64,
+# )
+
+# # 256x256 -> 32x32（kernel=10, stride=8, padding=1）
+# embed_32 = OverlapTokenPatchEmbed(
+#     img_size=256,
+#     patch_size=10,
+#     in_chans=3,
+#     embed_dim=768,
+#     stride=8,
+#     padding=1,
+#     default_grid_size=32,
+# )
+
+# # 256x256 -> 16x16（kernel=18, stride=16, padding=1）
+# embed_16 = OverlapTokenPatchEmbed(
+#     img_size=256,
+#     patch_size=18,
+#     in_chans=3,
+#     embed_dim=768,
+#     stride=16,
+#     padding=1,
+#     default_grid_size=16,
+# )
 
 
 
@@ -560,8 +716,8 @@ class Mamba2Blocks_Standard(nn.Module):
         )
         
         # 打印配置信息
-        print(f"模型配置: 总层数={n_layer}, MHA层索引={attn_layer_idx}")
-        print(f"交替模式: 偶数层(0,2,4...)使用Mamba1, 奇数层(1,3,5...)使用MHA")      
+        # print(f"模型配置: 总层数={n_layer}, MHA层索引={attn_layer_idx}")
+        # print(f"交替模式: 偶数层(0,2,4...)使用Mamba1, 奇数层(1,3,5...)使用MHA")      
 
         # LayerScale stabilizes deep stacks by shrinking each block's update before it enters the
         # next residual addition. When set to a tiny value (default 1e-3) it tames the gradient norm
@@ -824,7 +980,19 @@ class Encoder(nn.Module):
     def __init__(self, in_chans=3, embed_dim=96, mamba_blocks=[2, 2, 2, 2], swin_blocks=[2, 2, 2, 2], drop_branch_prob=0.2):
         super().__init__()
         
-        self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=in_chans, embed_dim=embed_dim)
+        # self.patchembed = TokenPatchEmbed(img_size=256, patch_size=4, in_chans=in_chans, embed_dim=embed_dim)
+
+
+        # # 256x256 -> 64x64（kernel=6, stride=4, padding=1）
+        self.patchembed = OverlapTokenPatchEmbed(
+                img_size=256,
+                patch_size=6,
+                in_chans=in_chans,
+                embed_dim=embed_dim,
+                stride=4,
+                padding=1,
+                default_grid_size=64,
+            )
 
         self.encoder_unit0 = EncoderUnit(embed_dim=96, grid_size=64, ori_img_size=256, mamba_blocks=mamba_blocks[0], swin_blocks=swin_blocks[0], 
                                     window_size=8, drop_branch_prob=drop_branch_prob, need_downsample=False, need_freqAttention=True)
@@ -838,8 +1006,8 @@ class Encoder(nn.Module):
         self.encoder_unit2 = EncoderUnit(embed_dim=384, grid_size=16, ori_img_size=256, mamba_blocks=mamba_blocks[2], swin_blocks=swin_blocks[2], 
                                     window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
         
-        self.encoder_unit3 = EncoderUnit(embed_dim=768, grid_size=8, ori_img_size=256, mamba_blocks=mamba_blocks[3], swin_blocks=swin_blocks[3], 
-                                    window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
+        # self.encoder_unit3 = EncoderUnit(embed_dim=768, grid_size=8, ori_img_size=256, mamba_blocks=mamba_blocks[3], swin_blocks=swin_blocks[3], 
+        #                             window_size=4, drop_branch_prob=drop_branch_prob, need_downsample=True, need_channelAttention=True)
     
     def forward(self, x_in):
         # x_in: (B, 3, 256, 256)
@@ -854,22 +1022,12 @@ class Encoder(nn.Module):
         tokens = self.encoder_unit1(tokens)  # (B, N, C)  N=32*32 C=192
         tokens_list.append(tokens)
 
-
-
-        # B, N, C = x_emb1.shape
-        # x_emb1 = x_emb1.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))  # (B, C, H, W)  C=96 H=W=64
-        # x_emb2 = self.downSample0(x_emb1)  # (B, C, H, W)  C=192 H=W=32
-        # x_emb2 = self.downSample1(x_emb2)  # (B, C, H, W)  C=384 H=W=16
-        # B, C, H, W = x_emb2.shape
-        # x_emb2 = x_emb2.contiguous().view(B, C, H*W).permute(0,2,1)  # (B, N, C)  C=384 N=16*16
-        # tokens = self.encoder_unit2(x_emb2)  # (B, N, C)  N=16*16 C=384
-        
         
         tokens = self.encoder_unit2(tokens)  # (B, N, C)  N=16*16 C=384
         tokens_list.append(tokens)
 
-        tokens = self.encoder_unit3(tokens)  # (B, N, C)  N=8*8 C=768
-        tokens_list.append(tokens)
+        # tokens = self.encoder_unit3(tokens)  # (B, N, C)  N=8*8 C=768
+        # tokens_list.append(tokens)
             
         return tokens_list
 
@@ -908,12 +1066,12 @@ class SubNet(nn.Module):
             nn.InstanceNorm2d(embed_dims[2]//2, affine=True),
             nn.GELU(),
         )
-        self.upsample3 = nn.Sequential(
-            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
-            nn.InstanceNorm2d(embed_dims[3]//2, affine=True),
-            nn.GELU(),
-        )
+        # self.upsample3 = nn.Sequential(
+        #     Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+        #     nn.Conv2d(embed_dims[3], embed_dims[3]//2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+        #     nn.InstanceNorm2d(embed_dims[3]//2, affine=True),
+        #     nn.GELU(),
+        # )
         
         self.downsample0 = nn.Sequential(
             nn.Conv2d(embed_dims[0], embed_dims[0]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
@@ -925,11 +1083,11 @@ class SubNet(nn.Module):
             nn.InstanceNorm2d(embed_dims[1]*2, affine=True),
             nn.GELU(),
         )
-        self.downsample2 = nn.Sequential(
-            nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
-            nn.InstanceNorm2d(embed_dims[2]*2, affine=True),
-            nn.GELU(),
-        )
+        # self.downsample2 = nn.Sequential(
+        #     nn.Conv2d(embed_dims[2], embed_dims[2]*2, kernel_size=2, stride=2, bias=False),# 不重叠下采样
+        #     nn.InstanceNorm2d(embed_dims[2]*2, affine=True),
+        #     nn.GELU(),
+        # )
         
         # 融合后的细化处理
         self.mamba_blocks = nn.ModuleList()
@@ -938,6 +1096,7 @@ class SubNet(nn.Module):
                 # VSSTokenMambaModule(dims=[embed_dims[i]], depths=[mam_blocks[i]], channel_first=True, drop_path_rate=0.05),
                 # Mamba2Blocks(dim=embed_dims[i], num_blocks=mam_blocks[i], channel_first=True, drop_path_rate=0.05),
                 Mamba2Blocks_Standard(d_model=embed_dims[i], n_layer=mam_blocks[i], d_intermediate=2*embed_dims[i], channel_first=True),
+                ChannelAttention(dim=embed_dims[i], num_heads=2, bias=False)
             ))
 
         
@@ -950,8 +1109,9 @@ class SubNet(nn.Module):
                                    requires_grad=True) if alpha_init_value > 0 else None
         self.alpha2 = nn.Parameter(alpha_init_value * torch.ones((1, channels[2], 1, 1)),
                                    requires_grad=True) if alpha_init_value > 0 else None
-        self.alpha3 = nn.Parameter(alpha_init_value * torch.ones((1, channels[3], 1, 1)),
-                                   requires_grad=True) if alpha_init_value > 0 else None            
+        
+        # self.alpha3 = nn.Parameter(alpha_init_value * torch.ones((1, channels[3], 1, 1)),
+        #                            requires_grad=True) if alpha_init_value > 0 else None            
     
     def forward(self, tokens_list, use_eval=True):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
@@ -975,21 +1135,28 @@ class SubNet(nn.Module):
             pass  # 已经是(B C H W)格式
         
         # 融合
-        self._clamp_abs(self.alpha3.data, 1e-3)        
+        # self._clamp_abs(self.alpha3.data, 1e-3)        
         self._clamp_abs(self.alpha2.data, 1e-3)
         self._clamp_abs(self.alpha1.data, 1e-3)
         self._clamp_abs(self.alpha0.data, 1e-3) 
 
-        x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
+        # x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
+        x_emb,f0,f1,f2 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
         
         # print('Token shapes in TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
         # # (64 64) (64 64) (32 32) (16 16) (8 8)
 
         f0 = f0*self.alpha0 + self.mamba_blocks[0](self.upsample1(f1)+x_emb)  
         f1 = f1*self.alpha1 + self.mamba_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
-        f2 = f2*self.alpha2 + self.mamba_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
-        f3 = f3*self.alpha3 + self.mamba_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
-        tokens_spatial_list = [x_emb,f0,f1,f2,f3]
+        f2 = f2*self.alpha2 + self.mamba_blocks[2](self.downsample1(f1))  
+        tokens_spatial_list = [x_emb,f0,f1,f2]
+
+
+        # f0 = f0*self.alpha0 + self.mamba_blocks[0](self.upsample1(f1)+x_emb)  
+        # f1 = f1*self.alpha1 + self.mamba_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
+        # f2 = f2*self.alpha2 + self.mamba_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
+        # f3 = f3*self.alpha3 + self.mamba_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
+        # tokens_spatial_list = [x_emb,f0,f1,f2,f3]
 
         # print('Token shapes out TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
 
@@ -1008,20 +1175,20 @@ class SubNet(nn.Module):
             tokens_list = tokens_list
             pass  # 已经是(B C H W)格式
 
-        x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
+        x_emb,f0,f1,f2 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
+        # x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
 
         # 使用自定义可逆前向 Function
-        x_emb, y0, y1, y2, y3 = _SubNetRevFunction.apply(
+        x_emb, y0, y1, y2 = _SubNetRevFunction.apply(
             self,
             use_eval,
             x_emb,
             f0,
             f1,
             f2,
-            f3,
         )
 
-        return [x_emb, y0, y1, y2, y3]  # (B, self.embed_dim, H_i, W_i)
+        return [x_emb, y0, y1, y2]  # (B, self.embed_dim, H_i, W_i)
     
 
     def _clamp_abs(self, data, value):
@@ -1046,56 +1213,54 @@ class _SubNetRevFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, subnet: nn.Module, use_eval: bool,
-                x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor, f3: torch.Tensor):
+                x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor):
         # 保存必要对象供 backward 使用
         ctx.subnet = subnet
         ctx.use_eval = use_eval
         # 保存输入的轻量副本用于 backward 的重算（避免保存中间激活）
-        ctx.save_for_backward(x_emb.detach(), f0.detach(), f1.detach(), f2.detach(), f3.detach())
+        ctx.save_for_backward(x_emb.detach(), f0.detach(), f1.detach(), f2.detach())
 
         # 正常前向（不需要构建 autograd 图，后面会重算）
         def _forward_once():
-            M0, M1, M2, M3 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2], subnet.mamba_blocks[3]
-            up1, up2, up3 = subnet.upsample1, subnet.upsample2, subnet.upsample3
-            dn0, dn1, dn2 = subnet.downsample0, subnet.downsample1, subnet.downsample2
+            M0, M1, M2 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2]
+            up1, up2= subnet.upsample1, subnet.upsample2
+            dn0, dn1 = subnet.downsample0, subnet.downsample1
 
             a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
             a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
             a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
-            a3 = subnet.alpha3 if hasattr(subnet, 'alpha3') and subnet.alpha3 is not None else None
 
             y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
             y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
-            y2 = (f2 if a2 is None else f2 * a2) + M2(up3(f3) + dn1(y1))
-            y3 = (f3 if a3 is None else f3 * a3) + M3(dn2(y2))
-            return y0, y1, y2, y3
+            y2 = (f2 if a2 is None else f2 * a2) + M2(dn1(y1))
+
+            return y0, y1, y2
 
         if use_eval:
             # 临时切 eval，避免 Dropout/BN 造成不一致；这里 forward 不需要梯度
             was = [m.training for m in subnet.mamba_blocks]
             for m in subnet.mamba_blocks:
                 m.eval()
-            y0, y1, y2, y3 = _forward_once()
+            y0, y1, y2 = _forward_once()
             # 恢复状态
             for m, t in zip(subnet.mamba_blocks, was):
                 m.train(t)
         else:
-            y0, y1, y2, y3 = _forward_once()
+            y0, y1, y2 = _forward_once()
 
-        return x_emb, y0, y1, y2, y3
+        return x_emb, y0, y1, y2
 
     @staticmethod
-    def backward(ctx, grad_x_emb: torch.Tensor, grad_y0: torch.Tensor, grad_y1: torch.Tensor, grad_y2: torch.Tensor, grad_y3: torch.Tensor):
+    def backward(ctx, grad_x_emb: torch.Tensor, grad_y0: torch.Tensor, grad_y1: torch.Tensor, grad_y2: torch.Tensor):
         subnet: nn.Module = ctx.subnet
         use_eval: bool = ctx.use_eval
-        saved_x_emb, saved_f0, saved_f1, saved_f2, saved_f3 = ctx.saved_tensors
+        saved_x_emb, saved_f0, saved_f1, saved_f2= ctx.saved_tensors
 
         # 重新构造需要梯度的叶子张量
         X = saved_x_emb.detach().requires_grad_(True)
         F0 = saved_f0.detach().requires_grad_(True)
         F1 = saved_f1.detach().requires_grad_(True)
         F2 = saved_f2.detach().requires_grad_(True)
-        F3 = saved_f3.detach().requires_grad_(True)
 
         # 收集需要梯度的参数
         params = [p for p in subnet.parameters() if p.requires_grad]
@@ -1108,14 +1273,14 @@ class _SubNetRevFunction(torch.autograd.Function):
                 m.eval()
 
         with torch.enable_grad():
-            y0, y1, y2, y3 = _subnet_forward_formula(subnet, X, F0, F1, F2, F3)
+            y0, y1, y2 = _subnet_forward_formula(subnet, X, F0, F1, F2)
 
             # 计算对输入和参数的 VJP
-            outs = (X, y0, y1, y2, y3)
-            gout = (grad_x_emb, grad_y0, grad_y1, grad_y2, grad_y3)
+            outs = (X, y0, y1, y2)
+            gout = (grad_x_emb, grad_y0, grad_y1, grad_y2)
             grads = torch.autograd.grad(
                 outputs=outs,
-                inputs=[X, F0, F1, F2, F3] + params,
+                inputs=[X, F0, F1, F2] + params,
                 grad_outputs=gout,
                 retain_graph=False,
                 create_graph=False,
@@ -1128,7 +1293,7 @@ class _SubNetRevFunction(torch.autograd.Function):
                 m.train(t)
 
         # 拆分输入与参数梯度
-        gX, gF0, gF1, gF2, gF3, *gparams = grads
+        gX, gF0, gF1, gF2, *gparams = grads
 
         # 将参数梯度累加到 .grad
         for p, gp in zip(params, gparams):
@@ -1147,22 +1312,21 @@ class _SubNetRevFunction(torch.autograd.Function):
         gF0 = _nz(gF0, F0)
         gF1 = _nz(gF1, F1)
         gF2 = _nz(gF2, F2)
-        gF3 = _nz(gF3, F3)
 
-        # 对应 forward 的参数顺序：subnet, use_eval, x_emb, f0, f1, f2, f3
+        # 对应 forward 的参数顺序：subnet, use_eval, x_emb, f0, f1, f2
         return (None,        # subnet
                 None,        # use_eval
                 gX,
                 gF0,
                 gF1,
-                gF2,
-                gF3)
+                gF2
+                )
 
 
-def _subnet_forward_reverse_call(subnet: nn.Module, x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor, f3: torch.Tensor,
+def _subnet_forward_reverse_call(subnet: nn.Module, x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor,
                                  use_eval: bool = True):
     """包装调用 _SubNetRevFunction，实现类似 .apply(local_funs, alpha, *args) 的接口。"""
-    return _SubNetRevFunction.apply(subnet, use_eval, x_emb, f0, f1, f2, f3)
+    return _SubNetRevFunction.apply(subnet, use_eval, x_emb, f0, f1, f2)
 
 
 def _maybe_tokens_to_spatial(tokens_list):
@@ -1191,36 +1355,36 @@ def _maybe_spatial_to_tokens(tokens_list):
 def _split_tokens_list(tokens_list):
     # 统一解包
     if len(tokens_list) != 5:
-        raise ValueError("tokens_list must be length 5: [x_emb,f0,f1,f2,f3]")
-    return tokens_list[0], tokens_list[1], tokens_list[2], tokens_list[3], tokens_list[4]
+        raise ValueError("tokens_list must be length 5: [x_emb,f0,f1,f2]")
+    return tokens_list[0], tokens_list[1], tokens_list[2], tokens_list[4]
 
 
-def _pack_tokens_list(x_emb, y0, y1, y2, y3):
-    return [x_emb, y0, y1, y2, y3]
+def _pack_tokens_list(x_emb, y0, y1, y2):
+    return [x_emb, y0, y1, y2]
 
 
-def _subnet_forward_formula(subnet: nn.Module, x_emb, f0, f1, f2, f3):
-    M0, M1, M2, M3 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2], subnet.mamba_blocks[3]
-    up1, up2, up3 = subnet.upsample1, subnet.upsample2, subnet.upsample3
-    dn0, dn1, dn2 = subnet.downsample0, subnet.downsample1, subnet.downsample2
+def _subnet_forward_formula(subnet: nn.Module, x_emb, f0, f1, f2):
+    M0, M1, M2 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2]
+    up1, up2 = subnet.upsample1, subnet.upsample2
+    dn0, dn1= subnet.downsample0, subnet.downsample1
     a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
     a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
     a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
-    a3 = subnet.alpha3 if hasattr(subnet, 'alpha3') and subnet.alpha3 is not None else None
+
     y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
     y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
-    y2 = (f2 if a2 is None else f2 * a2) + M2(up3(f3) + dn1(y1))
-    y3 = (f3 if a3 is None else f3 * a3) + M3(dn2(y2))
-    return y0, y1, y2, y3
+    y2 = (f2 if a2 is None else f2 * a2) + M2(dn1(y1))
+
+    return y0, y1, y2
 
 
 # 给 SubNet 增加一个可逆式前向的 API（不破坏原 forward）
 def _subnet_forward_reverse(self: SubNet, tokens_list, *, use_eval: bool = True):
     # 统一到 (B,C,H,W)
     spatials = _maybe_tokens_to_spatial(tokens_list)
-    x_emb, f0, f1, f2, f3 = _split_tokens_list(spatials)
-    x_emb2, y0, y1, y2, y3 = _subnet_forward_reverse_call(self, x_emb, f0, f1, f2, f3, use_eval=use_eval)
-    out_spatials = _pack_tokens_list(x_emb2, y0, y1, y2, y3)
+    x_emb, f0, f1, f2 = _split_tokens_list(spatials)
+    x_emb2, y0, y1, y2 = _subnet_forward_reverse_call(self, x_emb, f0, f1, f2, use_eval=use_eval)
+    out_spatials = _pack_tokens_list(x_emb2, y0, y1, y2)
     # 返回与输入同格式
     return _maybe_spatial_to_tokens(out_spatials)
 
@@ -1313,21 +1477,21 @@ class UnifiedTokenDecoder(nn.Module):
             )
         
 
-        self.upsample3 = nn.Sequential(
-            Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
-            # 1x1 Conv，去掉 bias
-            nn.Conv2d(embed_dims[3], embed_dims[3] // 2, kernel_size=1, stride=1, bias=False),
-            nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),  # 给IN加可学习仿射参数
-            nn.GELU(),
+        # self.upsample3 = nn.Sequential(
+        #     Interpolate(scale_factor=2, mode='bilinear', align_corners=False),
+        #     # 1x1 Conv，去掉 bias
+        #     nn.Conv2d(embed_dims[3], embed_dims[3] // 2, kernel_size=1, stride=1, bias=False),
+        #     nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),  # 给IN加可学习仿射参数
+        #     nn.GELU(),
 
-            nn.Conv2d(embed_dims[3] // 2, embed_dims[3] // 2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
-            nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),
-            nn.GELU(),             
-        )
-        self.convblock23 = nn.Sequential(
-            ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
-            ChannelAttention(dim=embed_dims[3]//2,num_heads=2,bias=True),
-            )
+        #     nn.Conv2d(embed_dims[3] // 2, embed_dims[3] // 2, kernel_size=3, stride=1, padding=1, bias=False, padding_mode='reflect'),
+        #     nn.InstanceNorm2d(embed_dims[3] // 2, affine=True),
+        #     nn.GELU(),             
+        # )
+        # self.convblock23 = nn.Sequential(
+        #     ConvNextBlock(embed_dims[3]//2, 2*embed_dims[3]//2, embed_dims[3]//2, kernel_size=3, layer_scale_init_value=1.0, drop_path=0.05),
+        #     ChannelAttention(dim=embed_dims[3]//2,num_heads=2,bias=True),
+        #     )
         
 
         # Base缩放因子
@@ -1384,12 +1548,10 @@ class UnifiedTokenDecoder(nn.Module):
             resident_tokens_list = resident_tokens_list 
             pass  # 已经是(B C H W)格式
 
-        f0,f1,f2,f3 = tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
-        r0,r1,r2,r3 = resident_tokens_list[1],resident_tokens_list[2],resident_tokens_list[3],resident_tokens_list[4]
+        f0,f1,f2= tokens_list[1],tokens_list[2],tokens_list[3]
+        r0,r1,r2 = resident_tokens_list[1],resident_tokens_list[2],resident_tokens_list[3]
 
-        f3 = f3 + r3
-
-        o2 = self.convblock23((f2 + self.upsample3(f3))) + r2 # (B, 384, 16, 16)
+        o2 = f2 + r2 # (B, 384, 16, 16)
 
         o1 = self.convblock12((f1 + self.upsample2(o2))) + r1 # (B, 192, 32, 32)
 
