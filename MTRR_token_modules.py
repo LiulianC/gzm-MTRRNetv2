@@ -581,37 +581,38 @@ class Mamba2Blocks_Standard(nn.Module):
         n_layer: int,# Mamba2数量
         d_intermediate: int,# MLP维度 0表示无MLP
 
-        # === Mamba1 配置 ===
-        ssm_cfg={
-            "layer": "Mamba1",    # 指定使用Mamba1
-            # 其他Mamba1参数（可选）
-            "d_state": 16,       # SSM状态维度
-            "d_conv": 4,          # 卷积核大小
-            "expand": 2,          # 扩展因子
-        },
-        # LayerScale：进一步抑制深堆叠残差的幅度增长
-        layer_scale_init: float = None,
-        layer_scale_max: float = None,
-
-        # # === Mamba2 配置 ===（已注释）
+        # #=== Mamba1 配置 ===
         # ssm_cfg={
-        #     "layer": "Mamba2",    # 指定使用Mamba2
-        #     # 稳定性相关默认值（可被调用方覆盖）
-        #     "d_state": 64,          # 从64改为16，参考Mamba1稳定配置
-        #     "d_conv": 4,
-        #     "expand": 2,
-        #     # 归一化与gate顺序
-        #     "rmsnorm": True,
-        #     "norm_before_gate": True,
-        #     # dt 初始化与限制（与 fused 路径匹配）
-        #     "dt_min": 1e-3,
-        #     "dt_max": 5e-2,
-        #     "dt_init_floor": 1e-4,
-        #     "dt_limit": (1e-4, 5e-1),
-        #     # 线性与卷积的bias配置（贴近官方默认）
-        #     "bias": False,
-        #     "conv_bias": True,
+        #     "layer": "Mamba1",    # 指定使用Mamba1
+        #     # 其他Mamba1参数（可选）
+        #     "d_state": 16,       # SSM状态维度
+        #     "d_conv": 4,          # 卷积核大小
+        #     "expand": 2,          # 扩展因子
         # },
+        # # LayerScale：进一步抑制深堆叠残差的幅度增长
+        # layer_scale_init: float = None,
+        # layer_scale_max: float = None,
+
+        # === Mamba2 配置 ===
+        ssm_cfg={
+            "layer": "Mamba2",    # 指定使用Mamba2
+            # 稳定性相关默认值（可被调用方覆盖）
+            "d_state": 64,          
+            "d_conv": 4,
+            "expand": 2,
+
+            # 归一化与gate顺序
+            # "rmsnorm": True,
+            # "norm_before_gate": True,
+            # dt 初始化与限制（与 fused 路径匹配）
+            "dt_min": 1e-3,
+            "dt_max": 5e-2,
+            "dt_init_floor": 1e-4,
+            # "dt_limit": (1e-4, 5e-1),
+            # 线性与卷积的bias配置（贴近官方默认）
+            "bias": False,
+            "conv_bias": True,
+        },
         # # LayerScale：进一步抑制深堆叠残差的幅度增长
         # layer_scale_init: float = 1e-4,
         # layer_scale_max: float = 1e-2,
@@ -722,17 +723,20 @@ class Mamba2Blocks_Standard(nn.Module):
         # LayerScale stabilizes deep stacks by shrinking each block's update before it enters the
         # next residual addition. When set to a tiny value (default 1e-3) it tames the gradient norm
         # growth observed in debug-grad.log without impacting representational capacity.
-        self.layer_scale_max = layer_scale_max
-        if layer_scale_init is not None and layer_scale_init > 0:
-            scale_dtype = torch.float32 if dtype is None else dtype
-            self.layer_scales = nn.ParameterList(
-                [
-                    nn.Parameter(layer_scale_init * torch.ones(d_model, device=device, dtype=scale_dtype))
-                    for _ in range(n_layer)
-                ]
-            )
-        else:
-            self.layer_scales = None
+        # self.layer_scale_max = layer_scale_max
+        # if layer_scale_init is not None and layer_scale_init > 0:
+        #     scale_dtype = torch.float32 if dtype is None else dtype
+        #     self.layer_scales = nn.ParameterList(
+        #         [
+        #             nn.Parameter(layer_scale_init * torch.ones(d_model, device=device, dtype=scale_dtype))
+        #             for _ in range(n_layer)
+        #         ]
+        #     )
+        # else:
+        #     self.layer_scales = None
+
+
+        self.layer_scales = None
 
         self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
             d_model, eps=norm_epsilon, **factory_kwargs
@@ -1101,7 +1105,7 @@ class SubNet(nn.Module):
 
         
 
-        alpha_init_value = 0.5  # 融合权重初始值
+        alpha_init_value = 0.7  # 融合权重初始值
         channels = embed_dims
         self.alpha0 = nn.Parameter(alpha_init_value * torch.ones((1, channels[0], 1, 1)),
                                    requires_grad=True) if alpha_init_value > 0 else None
@@ -1113,13 +1117,14 @@ class SubNet(nn.Module):
         # self.alpha3 = nn.Parameter(alpha_init_value * torch.ones((1, channels[3], 1, 1)),
         #                            requires_grad=True) if alpha_init_value > 0 else None            
     
+        self.deconv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,groups=embed_dims[0])
+        self.deconv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,groups=embed_dims[1])
+        self.deconv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,groups=embed_dims[2])
+
     def forward(self, tokens_list, use_eval=True):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
 
-        if self.use_rev:
-            return self._forward_reverse(tokens_list, use_eval=use_eval)
-        else:
-            return self._forward_noreverse(tokens_list)
+        return self._forward_noreverse(tokens_list)
 
     def _forward_noreverse(self, tokens_list):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i)
@@ -1136,9 +1141,9 @@ class SubNet(nn.Module):
         
         # 融合
         # self._clamp_abs(self.alpha3.data, 1e-3)        
-        self._clamp_abs(self.alpha2.data, 1e-3)
-        self._clamp_abs(self.alpha1.data, 1e-3)
-        self._clamp_abs(self.alpha0.data, 1e-3) 
+        self._clamp_abs(self.alpha2.data, 1e-1)
+        self._clamp_abs(self.alpha1.data, 1e-1)
+        self._clamp_abs(self.alpha0.data, 1e-1) 
 
         # x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
         x_emb,f0,f1,f2 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
@@ -1146,251 +1151,26 @@ class SubNet(nn.Module):
         # print('Token shapes in TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
         # # (64 64) (64 64) (32 32) (16 16) (8 8)
 
-        f0 = f0*self.alpha0 + self.mamba_blocks[0](self.upsample1(f1)+x_emb)  
-        f1 = f1*self.alpha1 + self.mamba_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
-        f2 = f2*self.alpha2 + self.mamba_blocks[2](self.downsample1(f1))  
+        t0 = self.deconv_o0(torch.cat([self.upsample1(f1),x_emb],dim=1))
+        f0 = f0*(1-self.alpha0) + self.mamba_blocks[0](t0) * (self.alpha0)  
+
+        t1 = self.deconv_o1(torch.cat([self.upsample2(f2),self.downsample0(f0)],dim=1))
+        f1 = f1*(1-self.alpha1) + self.mamba_blocks[1](t1) * (self.alpha1)
+
+        t2 = self.downsample1(f1)
+        f2 = f2*(1-self.alpha2) + self.mamba_blocks[2](t2) * (self.alpha2)
+
         tokens_spatial_list = [x_emb,f0,f1,f2]
 
 
-        # f0 = f0*self.alpha0 + self.mamba_blocks[0](self.upsample1(f1)+x_emb)  
-        # f1 = f1*self.alpha1 + self.mamba_blocks[1](self.upsample2(f2)+self.downsample0(f0))  
-        # f2 = f2*self.alpha2 + self.mamba_blocks[2](self.upsample3(f3)+self.downsample1(f1))  
-        # f3 = f3*self.alpha3 + self.mamba_blocks[3](self.downsample2(f2))  # f3最浅 f0最深 
-        # tokens_spatial_list = [x_emb,f0,f1,f2,f3]
-
-        # print('Token shapes out TokenSubNet:', f0.shape, f1.shape, f2.shape, f3.shape)  # (B, C, H_i, W_i)
-
         return tokens_spatial_list  # (B, self.embed_dim, H_i, W_i)
-
-    def _forward_reverse(self, tokens_list, use_eval=True):
-        # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
-
-        if tokens_list[0].ndim == 3:  # 3维张量
-            for i, tokens in enumerate(tokens_list):
-                B, N, C = tokens.shape
-                H = W = int(math.sqrt(N))
-                tokens_list[i] = tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-                # (B C H W)
-        else:
-            tokens_list = tokens_list
-            pass  # 已经是(B C H W)格式
-
-        x_emb,f0,f1,f2 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3]
-        # x_emb,f0,f1,f2,f3 = tokens_list[0],tokens_list[1],tokens_list[2],tokens_list[3],tokens_list[4]
-
-        # 使用自定义可逆前向 Function
-        x_emb, y0, y1, y2 = _SubNetRevFunction.apply(
-            self,
-            use_eval,
-            x_emb,
-            f0,
-            f1,
-            f2,
-        )
-
-        return [x_emb, y0, y1, y2]  # (B, self.embed_dim, H_i, W_i)
-    
 
     def _clamp_abs(self, data, value):
         with torch.no_grad():
             sign = data.sign() # ​​符号保留​​
             data.abs_().clamp_(value) # 将输入张量 data 的每个元素的绝对值限制在 [value, +∞) 范围内
-            data *= sign    
+            data *= sign   
 
-
-# ========================= Reversible-style forward for SubNet =========================
-class _SubNetRevFunction(torch.autograd.Function):
-    """
-    自定义可逆前向的 autograd Function：
-    - forward: 使用 SubNet 正常公式计算 y0..y3，并返回 [x_emb, y0, y1, y2, y3]
-    - backward: 重新执行一遍前向（带梯度），通过 torch.autograd.grad 同时得到对
-                输入 (x_emb, f0, f1, f2, f3) 和参数的梯度，参数梯度将累计到
-                subnet.parameters() 的 .grad 上，输入梯度作为返回值。
-
-    注意：这里的 backward 不是 in-place 反演，而是“重算前向”的 VJP，
-    类似 revnets 的实现思路，减少存图而保证梯度正确传播。
-    """
-
-    @staticmethod
-    def forward(ctx, subnet: nn.Module, use_eval: bool,
-                x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor):
-        # 保存必要对象供 backward 使用
-        ctx.subnet = subnet
-        ctx.use_eval = use_eval
-        # 保存输入的轻量副本用于 backward 的重算（避免保存中间激活）
-        ctx.save_for_backward(x_emb.detach(), f0.detach(), f1.detach(), f2.detach())
-
-        # 正常前向（不需要构建 autograd 图，后面会重算）
-        def _forward_once():
-            M0, M1, M2 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2]
-            up1, up2= subnet.upsample1, subnet.upsample2
-            dn0, dn1 = subnet.downsample0, subnet.downsample1
-
-            a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
-            a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
-            a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
-
-            y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
-            y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
-            y2 = (f2 if a2 is None else f2 * a2) + M2(dn1(y1))
-
-            return y0, y1, y2
-
-        if use_eval:
-            # 临时切 eval，避免 Dropout/BN 造成不一致；这里 forward 不需要梯度
-            was = [m.training for m in subnet.mamba_blocks]
-            for m in subnet.mamba_blocks:
-                m.eval()
-            y0, y1, y2 = _forward_once()
-            # 恢复状态
-            for m, t in zip(subnet.mamba_blocks, was):
-                m.train(t)
-        else:
-            y0, y1, y2 = _forward_once()
-
-        return x_emb, y0, y1, y2
-
-    @staticmethod
-    def backward(ctx, grad_x_emb: torch.Tensor, grad_y0: torch.Tensor, grad_y1: torch.Tensor, grad_y2: torch.Tensor):
-        subnet: nn.Module = ctx.subnet
-        use_eval: bool = ctx.use_eval
-        saved_x_emb, saved_f0, saved_f1, saved_f2= ctx.saved_tensors
-
-        # 重新构造需要梯度的叶子张量
-        X = saved_x_emb.detach().requires_grad_(True)
-        F0 = saved_f0.detach().requires_grad_(True)
-        F1 = saved_f1.detach().requires_grad_(True)
-        F2 = saved_f2.detach().requires_grad_(True)
-
-        # 收集需要梯度的参数
-        params = [p for p in subnet.parameters() if p.requires_grad]
-
-        # 为了重算一致性，必要时临时切换 eval/train 状态
-        was_states = []
-        if use_eval:
-            for m in subnet.mamba_blocks:
-                was_states.append(m.training)
-                m.eval()
-
-        with torch.enable_grad():
-            y0, y1, y2 = _subnet_forward_formula(subnet, X, F0, F1, F2)
-
-            # 计算对输入和参数的 VJP
-            outs = (X, y0, y1, y2)
-            gout = (grad_x_emb, grad_y0, grad_y1, grad_y2)
-            grads = torch.autograd.grad(
-                outputs=outs,
-                inputs=[X, F0, F1, F2] + params,
-                grad_outputs=gout,
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=True,
-            )
-
-        # 恢复模块状态
-        if use_eval:
-            for m, t in zip(subnet.mamba_blocks, was_states):
-                m.train(t)
-
-        # 拆分输入与参数梯度
-        gX, gF0, gF1, gF2, *gparams = grads
-
-        # 将参数梯度累加到 .grad
-        for p, gp in zip(params, gparams):
-            if gp is None:
-                continue
-            if p.grad is None:
-                p.grad = gp.detach()
-            else:
-                p.grad.add_(gp.detach())
-
-        # 处理 None -> 0 的输入梯度
-        def _nz(g, ref):
-            return g if g is not None else torch.zeros_like(ref)
-
-        gX = _nz(gX, X)
-        gF0 = _nz(gF0, F0)
-        gF1 = _nz(gF1, F1)
-        gF2 = _nz(gF2, F2)
-
-        # 对应 forward 的参数顺序：subnet, use_eval, x_emb, f0, f1, f2
-        return (None,        # subnet
-                None,        # use_eval
-                gX,
-                gF0,
-                gF1,
-                gF2
-                )
-
-
-def _subnet_forward_reverse_call(subnet: nn.Module, x_emb: torch.Tensor, f0: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor,
-                                 use_eval: bool = True):
-    """包装调用 _SubNetRevFunction，实现类似 .apply(local_funs, alpha, *args) 的接口。"""
-    return _SubNetRevFunction.apply(subnet, use_eval, x_emb, f0, f1, f2)
-
-
-def _maybe_tokens_to_spatial(tokens_list):
-    # 将 (B, N, C) 列表转为 (B, C, H, W)
-    if tokens_list[0].ndim == 3:
-        out = []
-        for tokens in tokens_list:
-            B, N, C = tokens.shape
-            H = W = int(math.sqrt(N))
-            out.append(tokens.view(B, H, W, C).permute(0, 3, 1, 2).contiguous())
-        return out
-    return tokens_list
-
-
-def _maybe_spatial_to_tokens(tokens_list):
-    # 将 (B, C, H, W) 列表转回 (B, N, C)
-    if tokens_list[0].ndim == 4:
-        out = []
-        for feat in tokens_list:
-            B, C, H, W = feat.shape
-            out.append(feat.permute(0, 2, 3, 1).contiguous().view(B, H * W, C))
-        return out
-    return tokens_list
-
-
-def _split_tokens_list(tokens_list):
-    # 统一解包
-    if len(tokens_list) != 5:
-        raise ValueError("tokens_list must be length 5: [x_emb,f0,f1,f2]")
-    return tokens_list[0], tokens_list[1], tokens_list[2], tokens_list[4]
-
-
-def _pack_tokens_list(x_emb, y0, y1, y2):
-    return [x_emb, y0, y1, y2]
-
-
-def _subnet_forward_formula(subnet: nn.Module, x_emb, f0, f1, f2):
-    M0, M1, M2 = subnet.mamba_blocks[0], subnet.mamba_blocks[1], subnet.mamba_blocks[2]
-    up1, up2 = subnet.upsample1, subnet.upsample2
-    dn0, dn1= subnet.downsample0, subnet.downsample1
-    a0 = subnet.alpha0 if hasattr(subnet, 'alpha0') and subnet.alpha0 is not None else None
-    a1 = subnet.alpha1 if hasattr(subnet, 'alpha1') and subnet.alpha1 is not None else None
-    a2 = subnet.alpha2 if hasattr(subnet, 'alpha2') and subnet.alpha2 is not None else None
-
-    y0 = (f0 if a0 is None else f0 * a0) + M0(up1(f1) + x_emb)
-    y1 = (f1 if a1 is None else f1 * a1) + M1(up2(f2) + dn0(y0))
-    y2 = (f2 if a2 is None else f2 * a2) + M2(dn1(y1))
-
-    return y0, y1, y2
-
-
-# 给 SubNet 增加一个可逆式前向的 API（不破坏原 forward）
-def _subnet_forward_reverse(self: SubNet, tokens_list, *, use_eval: bool = True):
-    # 统一到 (B,C,H,W)
-    spatials = _maybe_tokens_to_spatial(tokens_list)
-    x_emb, f0, f1, f2 = _split_tokens_list(spatials)
-    x_emb2, y0, y1, y2 = _subnet_forward_reverse_call(self, x_emb, f0, f1, f2, use_eval=use_eval)
-    out_spatials = _pack_tokens_list(x_emb2, y0, y1, y2)
-    # 返回与输入同格式
-    return _maybe_spatial_to_tokens(out_spatials)
-
-
-# 将方法绑定到类
-setattr(SubNet, 'forward_reverse', _subnet_forward_reverse)
 
 
 
@@ -1493,11 +1273,18 @@ class UnifiedTokenDecoder(nn.Module):
         #     ChannelAttention(dim=embed_dims[3]//2,num_heads=2,bias=True),
         #     )
         
+        alpha_init_value = 0.7
+        self.alpha0 = nn.Parameter(alpha_init_value * torch.ones((1, embed_dims[0], 1, 1)),
+                                   requires_grad=True) if alpha_init_value > 0 else None
+        self.alpha1 = nn.Parameter(alpha_init_value * torch.ones((1, embed_dims[1], 1, 1)),
+                                   requires_grad=True) if alpha_init_value > 0 else None
+        self.alpha2 = nn.Parameter(alpha_init_value * torch.ones((1, embed_dims[2], 1, 1)),
+                                   requires_grad=True) if alpha_init_value > 0 else None
+        
+        # self.conv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,groups=embed_dims[2])
+        self.conv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,groups=embed_dims[1])
+        self.conv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,groups=embed_dims[0])
 
-        # Base缩放因子
-        # self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
-        self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
-        self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))
         
         
         # 上采样和卷积解码层
@@ -1506,6 +1293,8 @@ class UnifiedTokenDecoder(nn.Module):
             nn.ConvTranspose2d(96, 96, kernel_size=4, stride=2, padding=1, bias=False),
             nn.InstanceNorm2d(96, affine=True),
             nn.GELU(),
+
+            # ChannelAttention(dim=96,num_heads=2,bias=False),
 
             # 128x128 -> 256x256
             nn.ConvTranspose2d(96, 64, kernel_size=4, stride=2, padding=1, bias=False),
@@ -1522,6 +1311,11 @@ class UnifiedTokenDecoder(nn.Module):
             # 最终输出层（后面没有归一化，bias 可以保留）
             nn.Conv2d(32, 6, kernel_size=1, bias=True)  # 6通道输出 (T, R)
         )
+
+        # Base缩放因子
+        # self.base_scale = nn.Parameter(torch.tensor(base_scale_init))
+        self.base_scale_T = nn.Parameter(torch.tensor(base_scale_init))
+        self.base_scale_R = nn.Parameter(torch.tensor(base_scale_init))        
         
     def forward(self, tokens_list, resident_tokens_list, x_in):
         # tokens_list: (B, self.embed_dim, H_i, W_i)
@@ -1551,11 +1345,15 @@ class UnifiedTokenDecoder(nn.Module):
         f0,f1,f2= tokens_list[1],tokens_list[2],tokens_list[3]
         r0,r1,r2 = resident_tokens_list[1],resident_tokens_list[2],resident_tokens_list[3]
 
-        o2 = f2 + r2 # (B, 384, 16, 16)
+        self._clamp_abs(self.alpha2,1e-1)
+        self._clamp_abs(self.alpha1,1e-1)
+        self._clamp_abs(self.alpha0,1e-1)
 
-        o1 = self.convblock12((f1 + self.upsample2(o2))) + r1 # (B, 192, 32, 32)
+        o2 = self.alpha2*f2 + (1-self.alpha2)*r2 # (B, 384, 16, 16)
 
-        o0 = self.convblock01((f0 + self.upsample1(o1))) + r0 # (B, 96, 64, 64)
+        o1 = self.alpha1*self.convblock12((self.conv_o1(torch.cat([f1 , self.upsample2(o2)],dim=1)))) + (1-self.alpha1)*r1 # (B, 192, 32, 32)
+
+        o0 = self.alpha0*self.convblock01((self.conv_o0(torch.cat([f0 , self.upsample1(o1)],dim=1)))) + (1-self.alpha0)*r0 # (B, 96, 64, 64)
 
         # 解码
         delta = self.decoder(o0)  # (B, 6, 256, 256)
@@ -1569,3 +1367,10 @@ class UnifiedTokenDecoder(nn.Module):
 
         
         return output  # (B, 6, 256, 256)
+    
+
+    def _clamp_abs(self, data, value):
+        with torch.no_grad():
+            sign = data.sign() # ​​符号保留​​
+            data.abs_().clamp_(value) # 将输入张量 data 的每个元素的绝对值限制在 [value, +∞) 范围内
+            data *= sign    
