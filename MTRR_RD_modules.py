@@ -13,7 +13,7 @@ class Conv2DLayer(nn.Sequential):
         else:
             padding = dilation * (k_size - 1) // 2 # dilation指的是一种修改卷积操作的方法，它通过在卷积核中插入空洞（即在卷积核的元素之间增加间距）来扩大感受野
             # 用 add_module 方法将卷积层注册到模块中，命名为 'conv2d'，这样这个层可以在整个模型中被追踪和更新。
-        self.add_module('conv2d', nn.Conv2d(in_channels, out_channels, k_size, stride, padding, dilation=dilation, bias=bias)) # k_size 通常是 kernel size（卷积核大小）的缩写
+        self.add_module('conv2d', nn.Conv2d(in_channels, out_channels, k_size, stride, padding, dilation=dilation, bias=bias, padding_mode='reflect')) # k_size 通常是 kernel size（卷积核大小）的缩写
         if norm is not None: # "Norm" 归一化函数
             self.add_module('norm', norm(out_channels))
         if act is not None:
