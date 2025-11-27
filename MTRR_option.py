@@ -29,8 +29,8 @@ def build_train_opts(argv=None):
     opts = parser.parse_args(argv)
 
     # Post-populate attributes to match train.py behavior
-    opts.batch_size_train = 8
-    opts.batch_size_test = 8
+    opts.batch_size_train = 1
+    opts.batch_size_test = 4
 
     opts.shuffle = True
     opts.display_id = -1 
@@ -42,7 +42,7 @@ def build_train_opts(argv=None):
 
     opts.training = False
     
-    opts.epoch = 31
+    opts.epoch = 121
     opts.es_patience = 20
     if opts.training:
         opts.sampler_size1 = 0
@@ -54,21 +54,21 @@ def build_train_opts(argv=None):
     else:
         opts.sampler_size1 = 0
         opts.sampler_size2 = 0
-        opts.sampler_size3 = 8
+        opts.sampler_size3 = 1
         opts.sampler_size4 = 0
-        opts.sampler_size5 = 12
+        opts.sampler_size5 = 1
         opts.test_size = [200, 0, 0, 0, 200, 200]
 
     # Model loading/reset flags
-    # opts.model_path = './model_62_best1.pth'
-    # opts.model_path = './model_fit/model_240.pth'
-    opts.model_path = './model_fit/model_latest.pth'
+    opts.model_path = './model_118.pth'
+    # opts.model_path = './model_fit/model_latest.pth'
     # opts.model_path = None
     opts.reset_best = False
     opts.base_lr = 1e-4
 
     # Misc
     opts.color_enhance = False
+    opts.AdditionSkip_en = True
 
     # LR scheduler
     opts.scheduler_type = 'plateau'  # or 'cosine'

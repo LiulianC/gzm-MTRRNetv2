@@ -384,7 +384,7 @@ class DSRTestDataset(BaseDataset):
         M = TF.to_tensor(m_img)
         R = TF.to_tensor(r_img)
 
-        dic = {'input': M, 'target_t': B, 'fn': filename, 'real': self.real, 'target_r': R}
+        dic = {'input': M, 'target_t': B, 'fn': filename, 'real': self.real, 'target_r': R, 'Endo':False}
         if self.flag is not None:
             dic.update(self.flag) # 用于将一个字典（或键值对序列）的内容合并到当前字典中
         return dic
@@ -834,7 +834,7 @@ class HyperKDataset(Dataset):
         M = TF.to_tensor(m_img)
         R = TF.to_tensor(r_img)
 
-        dic = {'input': M, 'target_t': T, 'fn': filename, 'real': self.real, 'target_r': R}
+        dic = {'input': M, 'target_t': T, 'fn': filename, 'real': self.real, 'target_r': R, 'Endo':True}
 
         return dic
 

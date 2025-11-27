@@ -26,6 +26,9 @@ from util.csv import write_csv_row, _to_float
 from util.eval_util import _collect_and_zero_probs, eval_no_dropout
 from util.color_enhance import hist_match_batch_tensor
 from psdLoss.spec_loss_pack import SpecularityNetLossPack
+from rcmap_mask_fusion import apply_rcmap_mask_and_skip
+
+
 
 warnings.filterwarnings('ignore')
 opts = build_train_opts()
@@ -55,7 +58,7 @@ opts.scheduler_type = opts.scheduler_type  # 'plateau' or 'cosine'
 
  
 
-# nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train.log 2>&1 &
+# nohup /home/gzm/cp310pt26/bin/python /home/gzm/gzm-MTRRNetv2/train.py > /home/gzm/gzm-MTRRNetv2/train1.log 2>&1 &
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = MTRREngine(opts, device)
@@ -389,14 +392,21 @@ if __name__ == '__main__':
 
                     total_test_loss += loss.item()
 
- 
+
+                    index = quality_assess(test_fake_Ts[-1].to('cpu'), test_label1.to('cpu'))
+                    
+                    if opts.AdditionSkip_en and test_data1['Endo'][0]:
+                        AdditionSkip_img, mask = apply_rcmap_mask_and_skip(test_imgs=test_imgs,test_fake_Ts=test_fake_Ts[-1],test_rcmaps=test_rcmaps,threshold=20)
+                        index = quality_assess(AdditionSkip_img.to('cpu'), test_label1.to('cpu'))
+                    else:
+                        AdditionSkip_img = torch.zeros_like(test_imgs)
+                        mask = torch.zeros_like(test_imgs)
 
                     if opts.color_enhance:
-                        test_fake_Ts[-1] = hist_match_batch_tensor(test_fake_Ts[-1], test_imgs)
-
+                        hist_img = hist_match_batch_tensor(test_fake_Ts[-1], test_imgs)
+                        index = quality_assess(hist_img.to('cpu'), test_label1.to('cpu'))
 
                     # 计算psnr与ssim与NCC与LMSN
-                    index = quality_assess(test_fake_Ts[-1].to('cpu'), test_label1.to('cpu'))
                     file_name, psnr, ssim, lmse, ncc = test_data1['fn'], index['PSNR'], index['SSIM'], index['LMSE'], index['NCC']
                     # 数据集返回时 只要batchsize不为0 就返回的是列表
                     res = {'file':str(file_name),'PSNR':psnr,'SSIM':ssim,'LMSE':lmse,'NCC':ncc}
@@ -434,21 +444,37 @@ if __name__ == '__main__':
 
 
 
+                    if opts.training:
+                        B = test_imgs.size(0)
+                        grid_in  = make_grid(test_imgs, nrow=B, padding=0)
+                        grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=0)
+                        grid_tgt = make_grid(test_label1, nrow=B, padding=0)
+                        grid_cmap = make_grid(test_rcmaps, nrow=B, padding=0)
 
-                    B = test_imgs.size(0)
-                    grid_in  = make_grid(test_imgs, nrow=B, padding=0)
-                    grid_out = make_grid(test_fake_Ts[-1], nrow=B, padding=0)
-                    grid_tgt = make_grid(test_label1, nrow=B, padding=0)
-                    grid_cmap = make_grid(test_rcmaps, nrow=B, padding=0)
+                        grid_all = torch.cat([grid_in, grid_out, grid_tgt, grid_cmap], dim=1)  # dim=1 是 H 维度
 
-                    grid_all = torch.cat([grid_in, grid_out, grid_tgt, grid_cmap], dim=1)  # dim=1 是 H 维度
+                        if (i) % 1 == 0 and total_test_step % 1 == 0 and i<=10:                        
+                            save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
 
-                    if (i) % 1 == 0 and total_test_step % 1 == 0 and i<=10:                        
+                        elif i>=15 and (i) % 5 == 0 :
+                            save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
+
+                    else:
+                        B = test_imgs.size(0)
+                        grid_in  = make_grid(test_imgs, nrow=1, padding=0)
+                        # grid_out0 = make_grid(test_fake_Ts[0], nrow=1, padding=0)
+                        # grid_out1 = make_grid(test_fake_Ts[1], nrow=1, padding=0)
+                        # grid_out2 = make_grid(test_fake_Ts[2], nrow=1, padding=0)
+                        grid_out3 = make_grid(test_fake_Ts[3], nrow=1, padding=0)
+                        grid_skip = make_grid(AdditionSkip_img, nrow=1, padding=0)
+                        grid_tgt = make_grid(test_label1, nrow=1, padding=0)
+                        grid_cmap = make_grid(test_rcmaps, nrow=1, padding=0)
+                        grid_fakeR = make_grid(test_fake_Rs[3], nrow=1, padding=0)
+                        grid_mask = make_grid(mask, nrow=1, padding=0)
+
+
+                        grid_all = torch.cat([grid_in, grid_out3, grid_skip, grid_tgt, grid_cmap, grid_fakeR, grid_mask], dim=2)  # dim=1 是 H 维度
                         save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
-
-                    elif i>=15 and (i) % 5 == 0 :
-                        save_image(grid_all, os.path.join(output_dir6, f'epoch{i}+{total_test_step}+psnr{psnr:.4g}+ssim{ssim:.4g}.png'))
-
 
 
 
@@ -493,7 +519,10 @@ if __name__ == '__main__':
         else:
             print(f"ssim did not improve : best {max_ssim:.5f} now {avg_test_ssim:.5f} ")
         
-        
+        if opts.training:
+            print('='*50)
+            print('test end!')
+            break
 
         if model.net_c is not None:
             state = {
