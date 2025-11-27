@@ -581,38 +581,38 @@ class Mamba2Blocks_Standard(nn.Module):
         n_layer: int,# Mamba2数量
         d_intermediate: int,# MLP维度 0表示无MLP
 
-        # #=== Mamba1 配置 ===
-        # ssm_cfg={
-        #     "layer": "Mamba1",    # 指定使用Mamba1
-        #     # 其他Mamba1参数（可选）
-        #     "d_state": 16,       # SSM状态维度
-        #     "d_conv": 4,          # 卷积核大小
-        #     "expand": 2,          # 扩展因子
-        # },
-        # # LayerScale：进一步抑制深堆叠残差的幅度增长
+        #=== Mamba1 配置 ===
+        ssm_cfg={
+            "layer": "Mamba1",    # 指定使用Mamba1
+            # 其他Mamba1参数（可选）
+            "d_state": 16,       # SSM状态维度
+            "d_conv": 4,          # 卷积核大小
+            "expand": 2,          # 扩展因子
+        },
+        # LayerScale：进一步抑制深堆叠残差的幅度增长
         # layer_scale_init: float = None,
         # layer_scale_max: float = None,
 
         # === Mamba2 配置 ===
-        ssm_cfg={
-            "layer": "Mamba2",    # 指定使用Mamba2
-            # 稳定性相关默认值（可被调用方覆盖）
-            "d_state": 64,          
-            "d_conv": 4,
-            "expand": 2,
+        # ssm_cfg={
+        #     "layer": "Mamba2",    # 指定使用Mamba2
+        #     # 稳定性相关默认值（可被调用方覆盖）
+        #     "d_state": 64,          
+        #     "d_conv": 4,
+        #     "expand": 2,
 
-            # 归一化与gate顺序
-            # "rmsnorm": True,
-            # "norm_before_gate": True,
-            # dt 初始化与限制（与 fused 路径匹配）
-            "dt_min": 1e-3,
-            "dt_max": 5e-2,
-            "dt_init_floor": 1e-4,
-            # "dt_limit": (1e-4, 5e-1),
-            # 线性与卷积的bias配置（贴近官方默认）
-            "bias": False,
-            "conv_bias": True,
-        },
+        #     # 归一化与gate顺序
+        #     # "rmsnorm": True,
+        #     # "norm_before_gate": True,
+        #     # dt 初始化与限制（与 fused 路径匹配）
+        #     "dt_min": 1e-3,
+        #     "dt_max": 5e-2,
+        #     "dt_init_floor": 1e-4,
+        #     # "dt_limit": (1e-4, 5e-1),
+        #     # 线性与卷积的bias配置（贴近官方默认）
+        #     "bias": False,
+        #     "conv_bias": True,
+        # },
         # # LayerScale：进一步抑制深堆叠残差的幅度增长
         # layer_scale_init: float = 1e-4,
         # layer_scale_max: float = 1e-2,
@@ -621,7 +621,9 @@ class Mamba2Blocks_Standard(nn.Module):
         attn_layer_idx=None,  # 设置为None，将在内部自动设置为奇数层索引
         attn_cfg={
             "num_heads": 8,           # 注意力头数
+            # "num_heads": 32,           # 注意力头数
             "num_heads_kv": None,     # key-value头数，默认同num_heads
+            # "head_dim": 64,         # 头维度，默认使用embed_dim // num_heads
             "head_dim": None,         # 头维度，默认使用embed_dim // num_heads
             "mlp_dim": 0,             # MLP维度，0表示无MLP
             "qkv_proj_bias": True,    # QKV投影偏置
@@ -695,7 +697,7 @@ class Mamba2Blocks_Standard(nn.Module):
             _ssm_cfg_merged.update(ssm_cfg)
 
         # 确保使用Mamba1
-        _ssm_cfg_merged["layer"] = "Mamba1"
+        # _ssm_cfg_merged["layer"] = "Mamba2"
 
         self.layers = nn.ModuleList(
             [
@@ -893,7 +895,8 @@ class EncoderUnit(nn.Module):
 
         # 融合模块
         if self.mamba_processor is not None and self.swin_processor is not None:
-            self.fusion = AAF(embed_dim, 2)
+            # self.fusion = AAF(embed_dim, 2)
+            self.fusion = nn.Conv2d(in_channels=embed_dim*2,out_channels=embed_dim,kernel_size=3,stride=1,padding=1,padding_mode='reflect')
             self.fusion_out = nn.Identity()
         self.out = nn.Identity()
         
@@ -962,8 +965,17 @@ class EncoderUnit(nn.Module):
         # 正常融合（训练时没丢分支 / 测试时）
         # -------------------------
         if self.mamba_processor is not None and self.swin_processor is not None:
-            fused_tokens = self.fusion([low_tokens, high_tokens])
+            B, N, C = low_tokens.shape
+            low_tokens = low_tokens.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))            
+            high_tokens = high_tokens.permute(0,2,1).contiguous().view(B, C, int(N**0.5), int(N**0.5))    
+
+            fused_tokens = self.fusion(torch.cat([low_tokens, high_tokens],dim=1))
             fused_tokens = self.fusion_out(fused_tokens)
+
+            B, C, H, W = low_tokens.shape
+            fused_tokens = fused_tokens.permute(0,2,3,1).contiguous().view(B, H*W, C)   
+
+
             # fused_tokens = low_tokens + high_tokens
         elif self.mamba_processor is not None:
             fused_tokens = low_tokens
@@ -1117,9 +1129,14 @@ class SubNet(nn.Module):
         # self.alpha3 = nn.Parameter(alpha_init_value * torch.ones((1, channels[3], 1, 1)),
         #                            requires_grad=True) if alpha_init_value > 0 else None            
     
-        self.deconv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,groups=embed_dims[0])
-        self.deconv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,groups=embed_dims[1])
-        self.deconv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,groups=embed_dims[2])
+        self.deconv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        self.deconv_o0_f0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        
+        self.deconv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        self.deconv_o1_f1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        
+        # self.deconv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        self.deconv_o2_f2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
 
     def forward(self, tokens_list, use_eval=True):
         # tokens_list: [t0, t1, t2, t3] 每个都是 (B, N_i, C_i) 或 (B, C_i, H_i, W_i)
@@ -1152,13 +1169,13 @@ class SubNet(nn.Module):
         # # (64 64) (64 64) (32 32) (16 16) (8 8)
 
         t0 = self.deconv_o0(torch.cat([self.upsample1(f1),x_emb],dim=1))
-        f0 = f0*(1-self.alpha0) + self.mamba_blocks[0](t0) * (self.alpha0)  
+        f0 = self.deconv_o0_f0(torch.cat([f0, self.mamba_blocks[0](t0)],dim=1))
 
         t1 = self.deconv_o1(torch.cat([self.upsample2(f2),self.downsample0(f0)],dim=1))
-        f1 = f1*(1-self.alpha1) + self.mamba_blocks[1](t1) * (self.alpha1)
+        f1 = self.deconv_o1_f1(torch.cat([f1, self.mamba_blocks[1](t1)],dim=1))
 
         t2 = self.downsample1(f1)
-        f2 = f2*(1-self.alpha2) + self.mamba_blocks[2](t2) * (self.alpha2)
+        f2 = self.deconv_o2_f2(torch.cat([f2, self.mamba_blocks[2](t2)],dim=1))
 
         tokens_spatial_list = [x_emb,f0,f1,f2]
 
@@ -1281,9 +1298,9 @@ class UnifiedTokenDecoder(nn.Module):
         self.alpha2 = nn.Parameter(alpha_init_value * torch.ones((1, embed_dims[2], 1, 1)),
                                    requires_grad=True) if alpha_init_value > 0 else None
         
-        # self.conv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,groups=embed_dims[2])
-        self.conv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,groups=embed_dims[1])
-        self.conv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,groups=embed_dims[0])
+        # self.conv_o2 = nn.Conv2d(in_channels=embed_dims[3],out_channels=embed_dims[2],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        self.conv_o1 = nn.Conv2d(in_channels=embed_dims[2],out_channels=embed_dims[1],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
+        self.conv_o0 = nn.Conv2d(in_channels=embed_dims[1],out_channels=embed_dims[0],kernel_size=3,stride=1,padding=1,padding_mode='reflect')
 
         
         
